@@ -1,0 +1,412 @@
+"""
+dN/dS Pipeline: Pairwise synonymous and non-synonymous substitution rate
+estimation between two species.
+
+Three input modes — set in config/config.yaml:
+
+  Mode A — genome + GFF (full pipeline):
+    query:
+      fasta: path/to/species1.fasta
+      gff:   path/to/species1.gff
+      prefix: species1
+
+  Mode B — pre-made FAA + FNA (skip Anchorwave & transeq entirely):
+    query:
+      faa: path/to/species1.faa
+      fna: path/to/species1.fna
+      prefix: species1
+
+  Mode C — CDS nucleotide FNA only (transeq runs, Anchorwave skipped):
+    query:
+      fna: path/to/species1.fna
+      prefix: species1
+
+All modes are detected automatically and can be mixed per species.
+Priority when multiple keys are present: Mode B > Mode C > Mode A.
+
+Tool switches — set in config/config.yaml under tools:
+  cds_extraction: anchorwave | gffread   (Mode A only)
+  search_method:  blast | diamond        (all modes)
+  trimmer:        gblocks | trimal       (all modes)
+
+Output structure:
+  intermediate/
+    cds/           CDS nucleotide and protein sequences (Modes A and C)
+    blast/         Search databases, forward and reverse results
+    rbh_pairs.tsv  Filtered RBH gene pair list (query TAB target)
+    input/         Per-gene-pair FAA and FNA files
+    aligns/        MAFFT, pal2nal, and trimmed alignments
+    codeml/        Per-gene codeml output directories
+  results/
+    dnds_output.tsv  Final dN/dS table
+
+Steps:
+  [Mode A only]
+  1. Extract CDS (extract_cds.py — anchorwave or gffread)
+  2. Sanitise headers (clean_fna.py)
+  [Modes A and C]
+  3. Translate to protein (fix_transeq.py — EMBOSS transeq)
+  [All modes]
+  4. Reciprocal Best Hits (get_rbh.py — blast or diamond)
+  5. Extract per-gene-pair FAA and FNA (extract_gene_pair.py)
+  6. Protein alignment (MAFFT)
+  7. Codon alignment (pal2nal)
+  8. Alignment trimming (run_trimmer.py — gblocks or trimal)
+  9. dN/dS estimation (run_codeml.py — PAML codeml pairwise mode -2)
+  10. Parse and collate results (collate_results.py)
+"""
+
+# =============================================================================
+# Author:  Suvratha Jayaprasad
+# Contact: https://suvrathaprasad.github.io/index.html
+# License: CC BY-NC-ND 4.0 — you may use and share with attribution,
+#          but you may not modify or use for commercial purposes.
+#          © 2025 Suvratha Jayaprasad. All rights reserved.
+#          Full terms: https://creativecommons.org/licenses/by-nc-nd/4.0/
+# =============================================================================
+
+import os
+import sys
+
+configfile: "config/config.yaml"
+
+# ── Derived paths ─────────────────────────────────────────────────────────────
+QUERY_PREFIX  = config["query"]["prefix"]
+TARGET_PREFIX = config["target"]["prefix"]
+OUTDIR        = config["outdir"]
+EVALUE_CUTOFF = config["blast"]["evalue"]
+INTER         = f"{OUTDIR}/intermediate"
+RESULTS       = f"{OUTDIR}/results"
+
+# ── Tool switches (with defaults) ─────────────────────────────────────────────
+TOOLS         = config.get("tools", {})
+CDS_TOOL      = TOOLS.get("cds_extraction", "anchorwave")
+SEARCH_METHOD = TOOLS.get("search_method",  "blast")
+TRIMMER       = TOOLS.get("trimmer",        "gblocks")
+
+VALID = {
+    "cds_extraction": ["anchorwave", "gffread"],
+    "search_method":  ["blast", "diamond"],
+    "trimmer":        ["gblocks", "trimal"],
+}
+for key, val in [("cds_extraction", CDS_TOOL),
+                 ("search_method",  SEARCH_METHOD),
+                 ("trimmer",        TRIMMER)]:
+    if val not in VALID[key]:
+        sys.exit(
+            f"Config error: tools.{key} = '{val}' is not valid. "
+            f"Choose from: {', '.join(VALID[key])}"
+        )
+
+# ── Detect input mode per species ─────────────────────────────────────────────
+def _has(species, key):
+    return key in config[species] and config[species][key]
+
+def _mode(species):
+    """
+    Detect input mode for a species. Priority: B > C > A.
+
+      Mode A — fasta + gff  : CDS extracted, then translated
+      Mode B — faa + fna    : both files supplied, skip all extraction
+      Mode C — fna only     : CDS supplied, transeq translates
+
+    Any combination across the two species is valid.
+    """
+    if _has(species, "faa") and _has(species, "fna"):
+        return "B"
+    if _has(species, "fna") and not _has(species, "faa"):
+        return "C"
+    if _has(species, "fasta") and _has(species, "gff"):
+        return "A"
+    sys.exit(
+        f"Config error for '{species}': provide one of:\n"
+        f"  (fasta + gff)  — Mode A: genome + GFF\n"
+        f"  (faa + fna)    — Mode B: pre-made protein + CDS\n"
+        f"  (fna)          — Mode C: CDS nucleotide only"
+    )
+
+QUERY_MODE  = _mode("query")
+TARGET_MODE = _mode("target")
+
+# ── Resolve FAA and FNA paths ─────────────────────────────────────────────────
+def _resolved_faa(species, prefix):
+    m = _mode(species)
+    if m == "B":
+        return config[species]["faa"]
+    return f"{INTER}/cds/{prefix}.faa"
+
+def _resolved_fna(species, prefix):
+    m = _mode(species)
+    if m == "B":
+        return config[species]["fna"]
+    if m == "C":
+        return config[species]["fna"]
+    return f"{INTER}/cds/{prefix}.clean.fna"
+
+QUERY_FAA  = _resolved_faa("query",  QUERY_PREFIX)
+QUERY_FNA  = _resolved_fna("query",  QUERY_PREFIX)
+TARGET_FAA = _resolved_faa("target", TARGET_PREFIX)
+TARGET_FNA = _resolved_fna("target", TARGET_PREFIX)
+
+# ── Helper: read gene list once RBH checkpoint is done ───────────────────────
+def get_genes(wildcards):
+    rbh_file = checkpoints.get_rbh.get(**wildcards).output.rbh_tsv
+    with open(rbh_file) as f:
+        lines = [l for l in f.readlines() if not l.startswith("Query")]
+    return [f"gene{i+1}" for i, _ in enumerate(lines)]
+
+# ── Final target ──────────────────────────────────────────────────────────────
+rule all:
+    input:
+        f"{RESULTS}/dnds_output.tsv"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 1 — Extract CDS from genome + GFF [Mode A only]
+# Tool: anchorwave (default) or gffread
+# ─────────────────────────────────────────────────────────────────────────────
+if QUERY_MODE == "A":
+    rule extract_cds_query:
+        input:
+            fasta = config["query"]["fasta"],
+            gff   = config["query"]["gff"]
+        output:
+            f"{INTER}/cds/{QUERY_PREFIX}.fna"
+        log:
+            f"{OUTDIR}/logs/extract_cds_{QUERY_PREFIX}.log"
+        params:
+            cds_tool = CDS_TOOL
+        conda:
+            "../envs/anchorwave.yaml"
+        script:
+            "scripts/extract_cds.py"
+
+if TARGET_MODE == "A":
+    rule extract_cds_target:
+        input:
+            fasta = config["target"]["fasta"],
+            gff   = config["target"]["gff"]
+        output:
+            f"{INTER}/cds/{TARGET_PREFIX}.fna"
+        log:
+            f"{OUTDIR}/logs/extract_cds_{TARGET_PREFIX}.log"
+        params:
+            cds_tool = CDS_TOOL
+        conda:
+            "../envs/anchorwave.yaml"
+        script:
+            "scripts/extract_cds.py"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 2 — Sanitise Anchorwave headers [Mode A only]
+# (gffread produces clean headers; clean_fna.py only strips anchorwave
+# trailing annotations and adds the species prefix)
+# ─────────────────────────────────────────────────────────────────────────────
+if QUERY_MODE == "A":
+    rule clean_fna_query:
+        input:
+            f"{INTER}/cds/{QUERY_PREFIX}.fna"
+        output:
+            f"{INTER}/cds/{QUERY_PREFIX}.clean.fna"
+        params:
+            prefix   = QUERY_PREFIX,
+            cds_tool = CDS_TOOL
+        script:
+            "scripts/clean_fna.py"
+
+if TARGET_MODE == "A":
+    rule clean_fna_target:
+        input:
+            f"{INTER}/cds/{TARGET_PREFIX}.fna"
+        output:
+            f"{INTER}/cds/{TARGET_PREFIX}.clean.fna"
+        params:
+            prefix   = TARGET_PREFIX,
+            cds_tool = CDS_TOOL
+        script:
+            "scripts/clean_fna.py"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 3 — Translate CDS to protein [Modes A and C]
+# ─────────────────────────────────────────────────────────────────────────────
+if QUERY_MODE in ("A", "C"):
+    rule translate_query:
+        input:
+            f"{INTER}/cds/{QUERY_PREFIX}.clean.fna" if QUERY_MODE == "A"
+            else config["query"]["fna"]
+        output:
+            f"{INTER}/cds/{QUERY_PREFIX}.faa"
+        log:
+            f"{OUTDIR}/logs/transeq_{QUERY_PREFIX}.log"
+        conda:
+            "../envs/emboss.yaml"
+        script:
+            "scripts/fix_transeq.py"
+
+if TARGET_MODE in ("A", "C"):
+    rule translate_target:
+        input:
+            f"{INTER}/cds/{TARGET_PREFIX}.clean.fna" if TARGET_MODE == "A"
+            else config["target"]["fna"]
+        output:
+            f"{INTER}/cds/{TARGET_PREFIX}.faa"
+        log:
+            f"{OUTDIR}/logs/transeq_{TARGET_PREFIX}.log"
+        conda:
+            "../envs/emboss.yaml"
+        script:
+            "scripts/fix_transeq.py"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 4 — Reciprocal Best Hits
+# Tool: blast (default) or diamond
+# ─────────────────────────────────────────────────────────────────────────────
+checkpoint get_rbh:
+    input:
+        query  = QUERY_FAA,
+        target = TARGET_FAA
+    output:
+        rbh_tsv   = f"{INTER}/rbh_pairs.tsv",
+        blast_fwd = f"{INTER}/blast/fwd.tsv",
+        blast_rev = f"{INTER}/blast/rev.tsv"
+    params:
+        evalue  = EVALUE_CUTOFF,
+        threads = config["blast"]["threads"],
+        min_cov = config["blast"].get("min_cov", 60),
+        db_dir  = f"{INTER}/blast/db",
+        method  = SEARCH_METHOD
+    threads:
+        config["blast"]["threads"]
+    log:
+        os.path.abspath(f"{OUTDIR}/logs/get_rbh.log")
+    conda:
+        "../envs/rbh.yaml"
+    shell:
+        """
+        python3 workflow/scripts/get_rbh.py \
+            --query     {input.query} \
+            --target    {input.target} \
+            --out       {output.rbh_tsv} \
+            --blast_fwd {output.blast_fwd} \
+            --blast_rev {output.blast_rev} \
+            --db_dir    {params.db_dir} \
+            --method    {params.method} \
+            --evalue    {params.evalue} \
+            --min_cov   {params.min_cov} \
+            --threads   {params.threads} \
+            > {log} 2>&1
+        """
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 5 — Extract per-gene-pair FAA and FNA sequences
+# ─────────────────────────────────────────────────────────────────────────────
+rule extract_gene_sequences:
+    input:
+        pairs = f"{INTER}/rbh_pairs.tsv",
+        qfna  = QUERY_FNA,
+        tfna  = TARGET_FNA,
+        qfaa  = QUERY_FAA,
+        tfaa  = TARGET_FAA
+    output:
+        fna = f"{INTER}/input/{{gene}}.fna",
+        faa = f"{INTER}/input/{{gene}}.faa"
+    params:
+        idx = lambda wc: int(wc.gene.replace("gene", ""))
+    shell:
+        """
+        python3 workflow/scripts/extract_gene_pair.py \
+            --pairs   {input.pairs} \
+            --idx     {params.idx} \
+            --qfna    {input.qfna} \
+            --tfna    {input.tfna} \
+            --qfaa    {input.qfaa} \
+            --tfaa    {input.tfaa} \
+            --out_fna {output.fna} \
+            --out_faa {output.faa}
+        """
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 6 — Protein alignment (MAFFT)
+# ─────────────────────────────────────────────────────────────────────────────
+rule mafft:
+    input:
+        f"{INTER}/input/{{gene}}.faa"
+    output:
+        f"{INTER}/aligns/{{gene}}.aln"
+    log:
+        f"{OUTDIR}/logs/mafft/{{gene}}.log"
+    params:
+        threads = config["mafft"]["threads"]
+    threads:
+        config["mafft"]["threads"]
+    conda:
+        "../envs/mafft.yaml"
+    shell:
+        "mafft --auto --thread {params.threads} {input} > {output} 2>{log}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 7 — Codon alignment (pal2nal)
+# ─────────────────────────────────────────────────────────────────────────────
+rule pal2nal:
+    input:
+        aln = f"{INTER}/aligns/{{gene}}.aln",
+        fna = f"{INTER}/input/{{gene}}.fna"
+    output:
+        f"{INTER}/aligns/{{gene}}.pal2nal"
+    log:
+        f"{OUTDIR}/logs/pal2nal/{{gene}}.log"
+    conda:
+        "../envs/pal2nal.yaml"
+    shell:
+        "pal2nal.pl {input.aln} {input.fna} -nogap -output fasta > {output} 2>{log}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 8 — Alignment trimming
+# Tool: gblocks (default) or trimal
+# Output filename is always {gene}.pal2nal-gb1.fa regardless of tool
+# ─────────────────────────────────────────────────────────────────────────────
+rule trim_alignment:
+    input:
+        f"{INTER}/aligns/{{gene}}.pal2nal"
+    output:
+        f"{INTER}/aligns/{{gene}}.pal2nal-gb1.fa"
+    log:
+        f"{OUTDIR}/logs/trimmer/{{gene}}.log"
+    params:
+        trimmer = TRIMMER
+    conda:
+        "../envs/trimmer.yaml"
+    script:
+        "scripts/run_trimmer.py"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 9 — dN/dS estimation (run_codeml.py)
+# ─────────────────────────────────────────────────────────────────────────────
+rule codeml:
+    input:
+        aln = f"{INTER}/aligns/{{gene}}.pal2nal-gb1.fa",
+        ctl = "config/codeml.ctl"
+    output:
+        txt = f"{INTER}/codeml/{{gene}}/{{gene}}_codeml.txt"
+    log:
+        f"{OUTDIR}/logs/codeml/{{gene}}.log"
+    params:
+        workdir = f"{INTER}/codeml/{{gene}}"
+    conda:
+        "../envs/paml.yaml"
+    script:
+        "scripts/run_codeml.py"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 10 — Parse codeml outputs and collate into final results table
+# ─────────────────────────────────────────────────────────────────────────────
+def all_codeml_outputs(wildcards):
+    genes = get_genes(wildcards)
+    return expand(f"{INTER}/codeml/{{gene}}/{{gene}}_codeml.txt", gene=genes)
+
+rule collate_results:
+    input:
+        all_codeml_outputs
+    output:
+        f"{RESULTS}/dnds_output.tsv"
+    script:
+        "scripts/collate_results.py"

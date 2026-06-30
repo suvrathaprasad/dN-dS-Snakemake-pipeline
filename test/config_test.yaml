@@ -1,0 +1,29 @@
+# Test configuration — Mode B (pre-made FAA + FNA, skips extraction and translation)
+
+query:
+  faa:    "test/data/species1.faa"
+  fna:    "test/data/species1.fna"
+  prefix: "species1"
+
+target:
+  faa:    "test/data/species2.faa"
+  fna:    "test/data/species2.fna"
+  prefix: "species2"
+
+outdir: "test/output"
+
+blast:
+  evalue:  1e-5   # e-value cutoff for RBH
+  min_cov: 60     # minimum % coverage of shorter sequence (30-99)
+  threads: 4
+
+mafft:
+  threads: 4
+
+# Tool switches — defaults shown here. Since this test uses Mode B,
+# cds_extraction is not used. Try switching search_method or trimmer
+# to test the alternative tools end to end.
+tools:
+  cds_extraction: "anchorwave"  # anchorwave (default) | gffread — unused in Mode B
+  search_method:  "blast"       # blast (default)      | diamond
+  trimmer:        "gblocks"     # gblocks (default)    | trimal

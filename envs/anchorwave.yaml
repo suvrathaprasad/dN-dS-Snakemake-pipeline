@@ -1,0 +1,8 @@
+name: anchorwave
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - anchorwave >=1.2.3
+  - gffread >=0.12.7

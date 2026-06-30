@@ -1,0 +1,9 @@
+name: getRBH
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - blast =2.15.0
+  - diamond >=2.1.0
+  - perl

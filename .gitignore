@@ -1,0 +1,23 @@
+# Snakemake
+.snakemake/
+*.snakemake.log
+
+# Results (users generate their own)
+results/
+
+# Conda environments (built locally)
+.conda/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+*.swp
+*~

@@ -1,0 +1,8 @@
+name: pal2nal
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - pal2nal >=14
+  - perl >=5.32

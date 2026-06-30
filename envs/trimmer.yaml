@@ -1,0 +1,8 @@
+name: trimmer
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - gblocks >=0.91b
+  - trimal >=1.4.1

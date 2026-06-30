@@ -1,0 +1,7 @@
+name: paml
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - paml >=4.9j

@@ -1,0 +1,79 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# dN/dS Pipeline Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# INPUT MODE — choose one per species (modes can be mixed between species):
+#
+#   Mode A — genome + GFF:
+#     Anchorwave (or gffread) extracts CDS, EMBOSS transeq translates.
+#     query:
+#       fasta:  path/to/species1.fasta
+#       gff:    path/to/species1.gff
+#       prefix: species1
+#
+#   Mode B — pre-made FAA + FNA:
+#     Both protein and CDS files supplied. Skips extraction and translation.
+#     query:
+#       faa:    path/to/species1.faa
+#       fna:    path/to/species1.fna
+#       prefix: species1
+#
+#   Mode C — CDS nucleotide FNA only:
+#     CDS FASTA supplied. Skips extraction; transeq translates automatically.
+#     query:
+#       fna:    path/to/species1.fna
+#       prefix: species1
+#
+# Priority when multiple keys present: Mode B > Mode C > Mode A.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# --- Query species (species 1) -----------------------------------------------
+query:
+  # Mode A:
+  # fasta: "path/to/species1.fasta"
+  # gff:   "path/to/species1.gff"
+
+  # Mode B:
+  # faa: "path/to/species1.faa"
+  # fna: "path/to/species1.fna"
+
+  # Mode C:
+  fna: "path/to/species1.fna"
+
+  prefix: "species1"
+
+# --- Target species (species 2) ----------------------------------------------
+target:
+  # Mode A:
+  # fasta: "path/to/species2.fasta"
+  # gff:   "path/to/species2.gff"
+
+  # Mode B:
+  # faa: "path/to/species2.faa"
+  # fna: "path/to/species2.fna"
+
+  # Mode C:
+  fna: "path/to/species2.fna"
+
+  prefix: "species2"
+
+# --- Output directory --------------------------------------------------------
+outdir: "output"
+
+# --- BLAST / RBH parameters --------------------------------------------------
+blast:
+  evalue:  1e-5   # e-value cutoff for RBH filtering
+  min_cov: 60     # minimum % coverage of shorter sequence (default 60)
+  threads: 8      # CPU threads for blastp / diamond
+
+# --- MAFFT parameters --------------------------------------------------------
+mafft:
+  threads: 6
+
+# --- Tool switches -----------------------------------------------------------
+# Each setting has a default (the first option listed) and an alternative.
+# Change only the tools you want to switch; others will use the default.
+tools:
+  cds_extraction: "anchorwave"  # anchorwave (default) | gffread
+  search_method:  "blast"       # blast (default)      | diamond
+  trimmer:        "gblocks"     # gblocks (default)    | trimal

@@ -4,6 +4,15 @@
 
 # Results (users generate their own)
 results/
+output/
+
+# Local config overrides with real data paths — never commit these.
+# config/config.yaml itself stays tracked as a template with placeholder
+# paths; use config.local.yaml or any config_*.yaml (except test configs)
+# for real runs and pass it via --configfile.
+config/config.local.yaml
+config/*.local.yaml
+config/private_*.yaml
 
 # Conda environments (built locally)
 .conda/

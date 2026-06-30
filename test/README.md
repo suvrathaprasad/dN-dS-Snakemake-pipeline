@@ -32,10 +32,37 @@ snakemake --snakefile workflow/Snakefile \
           --cores 4
 ```
 
-Expected output: `test/output/results/dnds_output.txt`
+Expected output: `test/output/results/dnds_output.tsv`
 
-The test uses **Mode B** (pre-made FAA + FNA), so Anchorwave and transeq
-are skipped automatically. No genome assembly or GFF file is needed.
+The test uses **Mode B** (pre-made FAA + FNA), so CDS extraction and
+translation are skipped automatically. No genome assembly or GFF file is needed.
+
+## Testing alternative tools
+
+`config_test.yaml` includes a `tools:` section with the same switches available
+in the main pipeline config. Since this test runs in Mode B, `cds_extraction`
+is not used, but `search_method` and `trimmer` can both be tested on the
+small dataset before committing to a choice for your real data:
+
+```yaml
+tools:
+  search_method: "diamond"   # try DIAMOND instead of BLAST+
+  trimmer:       "trimal"    # try trimAl instead of Gblocks
+```
+
+Edit `config_test.yaml` directly, or pass an override on the command line:
+
+```bash
+snakemake --snakefile workflow/Snakefile \
+          --configfile test/config_test.yaml \
+          --config tools='{"search_method": "diamond", "trimmer": "trimal"}' \
+          --use-conda \
+          --cores 4
+```
+
+Both runs should produce the same set of RBH gene pairs and comparable
+dN/dS estimates, since the alternative tools are designed as drop-in
+replacements rather than different analyses.
 
 ---
 

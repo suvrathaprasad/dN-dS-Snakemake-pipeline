@@ -32,7 +32,17 @@ snakemake --snakefile workflow/Snakefile \
           --cores 4
 ```
 
-Expected output: `test/output/results/dnds_output.tsv`
+Expected outputs:
+- `test/output/results/dnds_output.tsv` — dN/dS table
+- `test/output/results/plots/` — four PDF figures (boxplot, violin, scatter, summary)
+- `test/output/results/tables/` — ten TSV gene-list files
+
+> **Note on plots with test data:** the test sequences are back-translations
+> of proteins so dS values will be near zero. All genes will fall into the
+> "Undefined (dS=0)" category and the pipeline will generate placeholder
+> PDFs with a message explaining this. This is expected — the test validates
+> the toolchain end to end, not the biological output. Run with real data
+> to produce meaningful plots and tables.
 
 The test uses **Mode B** (pre-made FAA + FNA), so CDS extraction and
 translation are skipped automatically. No genome assembly or GFF file is needed.

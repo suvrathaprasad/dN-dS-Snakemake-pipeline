@@ -21,6 +21,7 @@ from pathlib import Path
 # ── Snakemake-injected objects ────────────────────────────────────────────────
 input_files = list(snakemake.input)
 output_file = Path(snakemake.output[0])
+trimmer     = snakemake.config.get("tools", {}).get("trimmer", "gblocks")
 
 output_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -37,7 +38,7 @@ def parse_codeml(path: str):
     except OSError:
         return []
 
-    # Skip sentinel files written when Gblocks trimmed everything
+    # Skip sentinel files written when the trimmer removed all positions
     if text.strip().startswith("Skipped:"):
         return []
 
@@ -86,7 +87,8 @@ for f in input_files:
     else:
         rows.extend(parsed)
 
-print(f"[collate_results] Parsed {len(rows)} gene pairs, skipped {skipped} (empty after Gblocks)")
+tool_label = "Gblocks" if trimmer == "gblocks" else "trimAl"
+print(f"[collate_results] Parsed {len(rows)} gene pairs, skipped {skipped} (empty alignment after {tool_label})")
 
 with open(output_file, "w") as fh:
     fh.write("Gene_query\tGene_target\tt\tdN\tdS\tdNdS\n")

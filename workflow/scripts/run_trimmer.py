@@ -18,7 +18,7 @@ Gblocks quirks handled here:
 trimAl writes directly to --out so none of the above apply.
 
 In both cases an empty sentinel file is created if no positions pass
-trimming, so codeml can skip the gene gracefully.
+trimming, so codeml can skip the gene gracefully downstream.
 """
 
 # =============================================================================
@@ -47,16 +47,25 @@ def write_log(msg: str, mode: str = "a") -> None:
         f.write(msg + "\n")
 
 
-def sentinel_if_empty(label: str) -> None:
-    """Create empty sentinel file if output is missing or empty."""
+def sentinel_if_empty(tool_name: str) -> bool:
+    """
+    Create empty sentinel file if output is missing or empty.
+    Returns True if sentinel was created (i.e. all positions were trimmed).
+    """
     if not output_fa.exists() or output_fa.stat().st_size == 0:
         output_fa.touch()
-        write_log(f"{label} trimmed all positions — empty sentinel created.")
+        write_log(
+            f"{tool_name} trimmed all positions for "
+            f"{input_aln.name} — empty sentinel created. "
+            f"This gene will be skipped by codeml."
+        )
+        return True
+    return False
 
 
 # ── Gblocks ───────────────────────────────────────────────────────────────────
 if tool == "gblocks":
-    write_log(f"Trimmer: Gblocks", mode="w")
+    write_log("Trimmer: Gblocks", mode="w")
     cmd = [
         "Gblocks", str(input_aln),
         "-t=c",
@@ -75,8 +84,9 @@ if tool == "gblocks":
     gblocks_out = Path(str(input_aln) + "-gb1.fa")
     if gblocks_out.exists() and gblocks_out.stat().st_size > 0:
         gblocks_out.rename(output_fa)
+        write_log(f"Gblocks trimmed successfully → {output_fa.name}")
     else:
-        # Also clean up empty sidecar files Gblocks may leave behind
+        # Clean up empty sidecar files Gblocks may leave behind
         for suffix in ("-gb1.fa", "-gb1.ps", "-gb1.html"):
             sidecar = Path(str(input_aln) + suffix)
             if sidecar.exists():
@@ -85,7 +95,7 @@ if tool == "gblocks":
 
 # ── trimAl ────────────────────────────────────────────────────────────────────
 elif tool == "trimal":
-    write_log(f"Trimmer: trimAl", mode="w")
+    write_log("Trimmer: trimAl", mode="w")
     cmd = [
         "trimal",
         "-in",       str(input_aln),
@@ -93,11 +103,16 @@ elif tool == "trimal":
         "-automated1",   # heuristic selection of best trimming method
         "-fasta",        # ensure FASTA output
     ]
+    # capture_output=True prevents trimAl's stdout from appearing on the
+    # Snakemake terminal — all output goes to the log file only
     result = subprocess.run(cmd, capture_output=True, text=True)
     write_log(result.stdout)
     if result.stderr:
         write_log(result.stderr)
-    sentinel_if_empty("trimAl")
+
+    trimmed_all = sentinel_if_empty("trimAl")
+    if not trimmed_all:
+        write_log(f"trimAl trimmed successfully → {output_fa.name}")
 
 else:
     raise ValueError(

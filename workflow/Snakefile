@@ -38,7 +38,23 @@ Output structure:
     aligns/        MAFFT, pal2nal, and trimmed alignments
     codeml/        Per-gene codeml output directories
   results/
-    dnds_output.tsv  Final dN/dS table
+    dnds_output.tsv                      Final dN/dS table
+    plots/dnds_boxplot.pdf                Boxplot of dN, dS, dN/dS
+    plots/dnds_violin.pdf                 Violin plot of dN, dS, dN/dS
+    plots/dnds_scatter.pdf                dN vs dS scatter
+    plots/functional_summary.pdf          Gene category bar chart
+    plots/pseudogene_evidence.pdf         Pseudogene evidence chart
+    tables/genes_conserved.tsv            ω < 0.5
+    tables/genes_relaxed.tsv              0.5 ≤ ω < 1
+    tables/genes_degenerate.tsv           ω ≥ 1
+    tables/genes_degenerate_annotated.tsv ω ≥ 1 + sequence evidence
+    tables/genes_undefined_ds.tsv         dS = 0
+    tables/genes_high_dn.tsv              dN above median
+    tables/genes_high_ds.tsv              dS above median
+    tables/genes_high_dnds.tsv            dN/dS above median
+    tables/genes_above_diagonal.tsv       dN > dS
+    tables/genes_on_diagonal.tsv          dN ≈ dS (±10%)
+    tables/genes_below_diagonal.tsv       dN < dS
 
 Steps:
   [Mode A only]
@@ -54,6 +70,8 @@ Steps:
   8. Alignment trimming (run_trimmer.py — gblocks or trimal)
   9. dN/dS estimation (run_codeml.py — PAML codeml pairwise mode -2)
   10. Parse and collate results (collate_results.py)
+  11. Visualisation and functional classification (plot_results.py)
+  12. Pseudogene sequence evidence check (check_pseudogenes.py)
 """
 
 # =============================================================================
@@ -137,11 +155,9 @@ def _resolved_faa(species, prefix):
 
 def _resolved_fna(species, prefix):
     m = _mode(species)
-    if m == "B":
+    if m in ("B", "C"):             # user-supplied FNA used directly
         return config[species]["fna"]
-    if m == "C":
-        return config[species]["fna"]
-    return f"{INTER}/cds/{prefix}.clean.fna"
+    return f"{INTER}/cds/{prefix}.clean.fna"  # Mode A: cleaned by clean_fna.py
 
 QUERY_FAA  = _resolved_faa("query",  QUERY_PREFIX)
 QUERY_FNA  = _resolved_fna("query",  QUERY_PREFIX)
@@ -158,7 +174,13 @@ def get_genes(wildcards):
 # ── Final target ──────────────────────────────────────────────────────────────
 rule all:
     input:
-        f"{RESULTS}/dnds_output.tsv"
+        f"{RESULTS}/dnds_output.tsv",
+        f"{RESULTS}/plots/dnds_boxplot.pdf",
+        f"{RESULTS}/plots/dnds_violin.pdf",
+        f"{RESULTS}/plots/dnds_scatter.pdf",
+        f"{RESULTS}/plots/functional_summary.pdf",
+        f"{RESULTS}/tables/genes_degenerate_annotated.tsv",
+        f"{RESULTS}/plots/pseudogene_evidence.pdf"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 1 — Extract CDS from genome + GFF [Mode A only]
@@ -410,3 +432,52 @@ rule collate_results:
         f"{RESULTS}/dnds_output.tsv"
     script:
         "scripts/collate_results.py"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 11 — Visualisation and functional classification (plot_results.py)
+#
+# Produces four PDF plots and ten TSV gene-list tables.
+# Runs automatically after collate_results.
+# ─────────────────────────────────────────────────────────────────────────────
+rule plot_results:
+    input:
+        tsv = f"{RESULTS}/dnds_output.tsv"
+    output:
+        boxplot    = f"{RESULTS}/plots/dnds_boxplot.pdf",
+        violin     = f"{RESULTS}/plots/dnds_violin.pdf",
+        scatter    = f"{RESULTS}/plots/dnds_scatter.pdf",
+        summary    = f"{RESULTS}/plots/functional_summary.pdf",
+        degenerate = f"{RESULTS}/tables/genes_degenerate.tsv"
+    params:
+        plots_dir          = f"{RESULTS}/plots",
+        tables_dir         = f"{RESULTS}/tables",
+        diagonal_tolerance = 0.10
+    log:
+        f"{OUTDIR}/logs/plot_results.log"
+    conda:
+        "../envs/plotting.yaml"
+    script:
+        "scripts/plot_results.py"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 12 — Pseudogene sequence evidence check (check_pseudogenes.py)
+#
+# For each degenerate candidate (ω ≥ 1), checks the CDS nucleotide sequences
+# for premature stop codons and frameshifts — two classic hallmarks of
+# pseudogenisation. Works in all input modes since FNA files are always
+# available by this stage of the pipeline.
+# ─────────────────────────────────────────────────────────────────────────────
+rule check_pseudogenes:
+    input:
+        degenerate = f"{RESULTS}/tables/genes_degenerate.tsv"
+    output:
+        annotated_tsv = f"{RESULTS}/tables/genes_degenerate_annotated.tsv",
+        evidence_pdf  = f"{RESULTS}/plots/pseudogene_evidence.pdf"
+    params:
+        input_dir = f"{INTER}/input"
+    log:
+        f"{OUTDIR}/logs/check_pseudogenes.log"
+    conda:
+        "../envs/plotting.yaml"
+    script:
+        "scripts/check_pseudogenes.py"

@@ -1,4 +1,4 @@
-name: getRBH
+name: rbh
 channels:
   - bioconda
   - conda-forge

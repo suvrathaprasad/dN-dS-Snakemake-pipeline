@@ -138,7 +138,15 @@ def parse_hits(path: str, min_cov: float) -> dict:
             qcov = (qend - qstart + 1) / qlen * 100 if qlen > 0 else 0
             scov = (send - sstart + 1) / slen * 100 if slen > 0 else 0
 
-            if qcov < min_cov and scov < min_cov:
+            # Coverage requirement applies to whichever sequence is shorter —
+            # that's the one a partial/domain-only alignment would most
+            # inflate. Using OR here (pass if *either* side clears min_cov)
+            # would let a small alignable domain on a much longer sequence
+            # through even when the short sequence itself is barely covered,
+            # which is exactly the spurious-hit case this filter exists to
+            # catch.
+            shorter_cov = scov if slen <= qlen else qcov
+            if shorter_cov < min_cov:
                 continue
 
             if qid not in best or bitscore > best[qid][2]:

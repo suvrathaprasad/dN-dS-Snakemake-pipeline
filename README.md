@@ -13,31 +13,37 @@ A reproducible Snakemake pipeline for estimating **pairwise synonymous (dS) and 
 ## Overview
 
 ```
- ┌─ Mode A: Genome + GFF ───────┐   ┌─ Mode B: FAA + FNA ──────┐   ┌─ Mode C: FNA only ───────┐
- │                              │   │                          │   │                          │
- │  Anchorwave or gffread       │   │  (skip extraction and    │   │  EMBOSS transeq          │
- │    Extract CDS per species   │   │     translation)         │   │    Translate → protein   │
- │      │                       │   │                          │   │                          │
- │      ▼                       │   │                          │   │                          │
- │  EMBOSS transeq → Protein    │   │                          │   │                          │
- └──────────────┬───────────────┘   └────────────┬─────────────┘   └────────────┬─────────────┘
-                │                                │                              │
-                └──────────────────────────┬─────┴──────────────────────────────┘
+ ┌─ Mode A: Genome + GFF ──────┐   ┌─ Mode B: FAA + FNA ──────┐   ┌─ Mode C: FNA only ───────┐
+ │                             │   │                          │   │                          │
+ │  Anchorwave or gffread      │   │  (skip extraction and    │   │  EMBOSS transeq          │
+ │    Extract CDS per species  │   │     translation)         │   │    Translate → protein   │
+ │      │                      │   │                          │   │                          │
+ │      ▼                      │   │                          │   │                          │
+ │  EMBOSS transeq → Protein   │   │                          │   │                          │
+ └──────────────┬──────────────┘   └────────────┬─────────────┘   └────────────┬─────────────┘
+                │                               │                              │
+                └──────────────────────────┬────┴──────────────────────────────┘
                                            │
                                            ▼
           BLAST+ or DIAMOND   Bidirectional search + Reciprocal Best Hits
                                            │
                                            ▼
-          MAFFT                Protein alignment per gene pair
+          extract_gene_pair.py   Per-gene-pair FAA + FNA extraction
                                            │
                                            ▼
-          pal2nal              Back-translate → codon alignment
+          MAFFT                  Protein alignment per gene pair
                                            │
                                            ▼
-          Gblocks or trimAl    Trim poorly aligned regions
+          pal2nal                Back-translate → codon alignment
                                            │
                                            ▼
-          PAML codeml          Pairwise dN/dS (runmode = -2)
+          Gblocks or trimAl      Trim poorly aligned regions
+                                           │
+                                           ▼
+          PAML codeml            Pairwise dN/dS (runmode = -2)
+                                           │
+                                           ▼
+          collate_results.py     Parse codeml output + dS saturation check
                                            │
                                            ▼
           output/results/dnds_output.tsv + plots/ + tables/
@@ -47,6 +53,12 @@ A reproducible Snakemake pipeline for estimating **pairwise synonymous (dS) and 
                                            │
                                            ▼
           genes_degenerate_annotated.tsv + pseudogene_evidence.pdf
+                                           │
+                                           ▼
+          write_summary.py       Collate everything into one report
+                                           │
+                                           ▼
+                             output/results/run_summary.pdf
 ```
 
 **Why RBH and not OrthoFinder?** For strict pairwise dN/dS between two species, RBH identifies one-to-one orthologs more directly and with less overhead. OrthoFinder is designed for multi-species ortholog inference and produces many-to-many groups that require additional filtering for pairwise analyses.
@@ -61,29 +73,36 @@ output/
 │   ├── cds/           CDS and protein sequences (Modes A and C)
 │   ├── blast/         Search databases, forward and reverse results
 │   ├── rbh_pairs.tsv  RBH gene pair list (query TAB target + stats)
-│   ├── input/         Per-gene-pair FAA and FNA files
-│   ├── aligns/        MAFFT, pal2nal, and trimmed alignments
+│   ├── input/         Per-gene-pair FAA and FNA files, plus cached
+│   │                  `*.offset_idx.json` index files (auto-generated
+│   │                  next to each source FASTA to speed up per-gene
+│   │                  extraction; safe to delete, rebuilt automatically)
+│   ├── aligns/        MAFFT, pal2nal, and trimmed alignments, plus a
+│   │                  per-gene subfolder (e.g. `gene1/`) holding any
+│   │                  Gblocks `.ps`/`.html` sidecar files for that gene
 │   └── codeml/        Per-gene codeml output directories
 ├── results/
-│   ├── dnds_output.tsv              ← FINAL dN/dS TABLE
+│   ├── dnds_output.tsv              ← FINAL dN/dS TABLE  (all gene pairs)
 │   ├── plots/
 │   │   ├── dnds_boxplot.pdf              Boxplot of dN, dS, and dN/dS
 │   │   ├── dnds_violin.pdf               Violin plot of dN, dS, and dN/dS
 │   │   ├── dnds_scatter.pdf              dN vs dS scatter
 │   │   ├── functional_summary.pdf        Gene category bar chart
 │   │   └── pseudogene_evidence.pdf       Pseudogene evidence chart
-│   └── tables/
-│       ├── genes_conserved.tsv               ω < 0.5
-│       ├── genes_relaxed.tsv                 0.5 ≤ ω < 1
-│       ├── genes_degenerate.tsv              ω ≥ 1
-│       ├── genes_degenerate_annotated.tsv    ω ≥ 1 + sequence evidence
-│       ├── genes_undefined_ds.tsv            dS = 0 (excluded from plots)
-│       ├── genes_high_dn.tsv                 dN above median
-│       ├── genes_high_ds.tsv                 dS above median
-│       ├── genes_high_dnds.tsv               dN/dS above median
-│       ├── genes_above_diagonal.tsv          dN > dS
-│       ├── genes_on_diagonal.tsv             dN ≈ dS (±10%)
-│       └── genes_below_diagonal.tsv          dN < dS
+│   ├── tables/
+│   │   ├── genes_conserved.tsv               ω < 0.5
+│   │   ├── genes_relaxed.tsv                 0.5 ≤ ω < 1
+│   │   ├── genes_degenerate.tsv              ω ≥ 1
+│   │   ├── genes_degenerate_annotated.tsv    ω ≥ 1 + sequence evidence
+│   │   ├── genes_ds_saturated.tsv            dS > saturation threshold
+│   │   ├── genes_undefined_ds.tsv            dS = 0 (excluded from plots)
+│   │   ├── genes_high_dn.tsv                 dN above median
+│   │   ├── genes_high_ds.tsv                 dS above median
+│   │   ├── genes_high_dnds.tsv               dN/dS above median
+│   │   ├── genes_above_diagonal.tsv          dN > dS
+│   │   ├── genes_on_diagonal.tsv             dN ≈ dS (±10%)
+│   │   └── genes_below_diagonal.tsv          dN < dS
+│   └── run_summary.pdf              ← FULL RUN SUMMARY REPORT
 └── logs/              Log files for every step
 ```
 
@@ -155,6 +174,14 @@ query:
 ```
 
 The pipeline detects which mode to use automatically. Priority when multiple keys are present: Mode B > Mode C > Mode A.
+
+By default all output is written under `output/` (paths throughout this
+README assume that default). This is configurable via `outdir` in
+`config/config.yaml`:
+
+```yaml
+outdir: "output"   # change to write intermediate/ and results/ elsewhere
+```
 
 ### 2. Configure tool switches (optional)
 
@@ -246,6 +273,11 @@ their position relative to the neutral diagonal (dN = dS):
 | Green  | On diagonal (dN ≈ dS, ±10%) | Evolving neutrally |
 | Red    | Above diagonal (dN > dS) | Degenerate / positive selection candidates |
 
+The dS saturation threshold (see [below](#ds-saturation-warning)) is also
+drawn on this plot: a vertical dotted orange line at `dS = dS_saturation_threshold`
+if that value falls within the displayed axis range, or a text annotation
+noting the threshold if it falls outside the range shown.
+
 ### Plot 4 — Functional summary (`functional_summary.pdf`)
 Bar chart showing gene counts per functional category with percentage
 labels. Categories follow standard dN/dS interpretation thresholds:
@@ -286,6 +318,10 @@ the full gene pair records from `dnds_output.tsv` for that category:
 | `genes_on_diagonal.tsv` | dN ≈ dS within ±10% |
 | `genes_below_diagonal.tsv` | dN < dS (scatter plot below diagonal) |
 
+> `genes_ds_saturated.tsv` also lives in `output/results/tables/`, but is
+> produced by `collate_results.py` rather than this step — see
+> [dS saturation warning](#ds-saturation-warning) below.
+
 ---
 
 ## Pseudogene sequence evidence
@@ -306,14 +342,15 @@ Each gene is checked independently in both species. Results are written to
 
 | Column | Values | Description |
 |--------|--------|-------------|
-| `premature_stop_query` | yes / no | Premature stop in query species CDS |
-| `premature_stop_target` | yes / no | Premature stop in target species CDS |
-| `frameshift_query` | yes / no | Frameshift in query species CDS |
-| `frameshift_target` | yes / no | Frameshift in target species CDS |
-| `pseudogene_evidence` | strong / weak | Strong = at least one hallmark detected; Weak = ω ≥ 1 only |
+| `premature_stop_query` | yes / no / unknown | Premature stop in query species CDS |
+| `premature_stop_target` | yes / no / unknown | Premature stop in target species CDS |
+| `frameshift_query` | yes / no / unknown | Frameshift in query species CDS |
+| `frameshift_target` | yes / no / unknown | Frameshift in target species CDS |
+| `pseudogene_evidence` | strong / weak / unknown | Strong = at least one hallmark detected; Weak = ω ≥ 1 only; Unknown = the CDS sequence for this gene ID couldn't be located under `intermediate/input/` |
 
 A two-panel PDF (`pseudogene_evidence.pdf`) summarises the counts:
-- Left panel: gene pairs by evidence level (strong vs weak)
+- Left panel: gene pairs by evidence level (strong / weak, plus an
+  Unknown bar if any gene IDs couldn't be matched to a sequence)
 - Right panel: breakdown by hallmark type (premature stop vs frameshift, per species)
 
 > **Important:** this is a first-pass sequence screen, not a replacement
@@ -327,7 +364,7 @@ A two-panel PDF (`pseudogene_evidence.pdf`) summarises the counts:
 **Why not a full pseudogene detection pipeline?**
 
 Dedicated pseudogene tools such as PseudoPipe and PGAP operate on a
-single genome assembly and GFF which scan for disrupted open reading
+single genome assembly and GFF — they scan for disrupted open reading
 frames, truncated proteins, and homology to known functional genes
 across the whole genome. This pipeline is fundamentally different: it
 is a *comparative* analysis working on *pairs* of orthologous genes
@@ -343,6 +380,49 @@ pipeline already has: premature stop codons and frameshifts in the
 pre-trimmed FNA files. This provides a rapid, dependency-free first
 screen that works in all input modes and flags the candidates most worth
 following up, without making claims the data cannot support.
+
+---
+
+## dS saturation warning
+
+Synonymous sites approach mutational saturation when dS is high — multiple
+substitutions occur at the same site, making dS an unreliable measure of
+divergence time and inflating or deflating dN/dS estimates unpredictably.
+The standard threshold in the field is dS > 2.0.
+
+Gene pairs exceeding the threshold are written to
+`output/results/tables/genes_ds_saturated.tsv` and flagged in the run
+summary. They are **not** removed from `dnds_output.tsv` — the decision
+of whether to exclude them is left to the user — but they are clearly
+identified so downstream interpretation can account for them.
+
+The threshold is configurable in `config/config.yaml`:
+
+```yaml
+dS_saturation_threshold: 2.0   # standard field value
+```
+
+---
+
+## Run summary report
+
+After all steps complete, the pipeline writes
+`output/results/run_summary.pdf` — a single-page PDF summarising the
+entire run. It includes:
+
+- Run metadata: species names, resolved input mode and file path(s) for
+  each species (the actual `fasta`/`gff`/`faa`/`fna` path(s) used, not
+  just the config prefix), tool switches, thresholds
+- Gene pair counts at each filter stage
+- dN, dS, and dN/dS summary statistics (median, mean, min, max)
+- Functional classification breakdown with percentages
+- dS saturation count with warning if any genes are flagged
+- Pseudogene evidence summary
+- A checklist of all output files with existence verification
+
+This report is designed to be attached to a manuscript as a supplementary
+methods summary or shared with collaborators for a quick overview of
+the analysis.
 
 ---
 

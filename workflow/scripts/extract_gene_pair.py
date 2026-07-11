@@ -5,6 +5,22 @@ extract_gene_pair.py — Extract one gene pair's FAA and FNA sequences.
 Uses indexed FASTA lookup (single pass to build index, then seek to offset)
 so large proteomes are not loaded entirely into memory for every gene.
 
+The index for each FASTA file is cached to disk next to the file itself
+(as "{fasta}.offset_idx.json") the first time it's built. Snakemake calls
+this script once per gene pair — often thousands of times per run — and
+without caching, every single invocation would re-scan the same query/
+target FASTA files from scratch just to look up one gene pair, making
+total indexing cost scale with (gene pairs x file size) instead of just
+(file size). With the cache, the first invocation to touch a given FASTA
+pays the scan cost once; every subsequent invocation (including ones
+running concurrently for other genes) just loads the cached offsets.
+
+The cache is invalidated automatically if the FASTA file is ever modified
+after the cache was written (checked via mtime), and cache writes are
+atomic (write to a temp file, then rename) so concurrent Snakemake jobs
+racing to build the same cache for the first time can't corrupt it for
+each other — worst case a few of them redundantly rebuild it in memory.
+
 Called by the Snakemake rule extract_gene_sequences.
 """
 
@@ -18,13 +34,15 @@ Called by the Snakemake rule extract_gene_sequences.
 # =============================================================================
 
 import argparse
+import json
+import os
 import sys
 from pathlib import Path
 
 
 def build_index(path: str) -> dict:
     """
-    Single-pass index: {sequence_id: (byte_offset_of_header, byte_offset_after_header)}
+    Single-pass index: {sequence_id: byte_offset_of_header}
     Allows random access into large FASTA files without loading them into memory.
     """
     index = {}
@@ -37,6 +55,47 @@ def build_index(path: str) -> dict:
             if line.startswith(b">"):
                 seq_id = line[1:].split()[0].decode()
                 index[seq_id] = offset
+    return index
+
+
+def _cache_path(fasta_path: str) -> Path:
+    return Path(str(fasta_path) + ".offset_idx.json")
+
+
+def load_or_build_index(fasta_path: str) -> dict:
+    """
+    Return the byte-offset index for fasta_path, using an on-disk cache
+    when it exists and is at least as new as the FASTA file itself.
+    Falls back to an in-memory rebuild (and best-effort cache refresh) on
+    any cache read/write problem, so a corrupt or racing cache write can
+    never break extraction — only cost a redundant scan.
+    """
+    cache_path = _cache_path(fasta_path)
+    fasta_mtime = os.path.getmtime(fasta_path)
+
+    if cache_path.exists():
+        try:
+            if os.path.getmtime(cache_path) >= fasta_mtime:
+                with open(cache_path) as fh:
+                    return json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            pass  # stale, corrupt, or mid-write cache — rebuild below
+
+    index = build_index(fasta_path)
+
+    # Best-effort atomic cache write; failure here just means the next
+    # invocation rebuilds it too — never a correctness issue.
+    tmp_path = cache_path.with_name(cache_path.name + f".tmp{os.getpid()}")
+    try:
+        with open(tmp_path, "w") as fh:
+            json.dump(index, fh)
+        os.replace(tmp_path, cache_path)
+    except OSError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     return index
 
 
@@ -88,11 +147,11 @@ def main():
         sys.exit(f"Index {args.idx} out of range (1–{len(lines)})")
     query_id, target_id = lines[args.idx - 1].split("\t")[:2]
 
-    # ── Build indexes (fast single pass per file) ─────────────────────────────
-    idx_qfaa = build_index(args.qfaa)
-    idx_tfaa = build_index(args.tfaa)
-    idx_qfna = build_index(args.qfna)
-    idx_tfna = build_index(args.tfna)
+    # ── Build/load indexes (cached on disk after the first invocation) ───────
+    idx_qfaa = load_or_build_index(args.qfaa)
+    idx_tfaa = load_or_build_index(args.tfaa)
+    idx_qfna = load_or_build_index(args.qfna)
+    idx_tfna = load_or_build_index(args.tfna)
 
     # ── Validate IDs exist ────────────────────────────────────────────────────
     for label, store, key in [

@@ -14,6 +14,11 @@ test/
 └── config_test.yaml   # Config in Mode B (pre-made FAA + FNA)
 ```
 
+Running the pipeline will also create `*.offset_idx.json` cache files
+alongside the files in `data/` (cached FASTA indexes, rebuilt automatically
+if the source file changes). These are gitignored — safe to ignore or
+delete.
+
 Species2 sequences are derived from species1 by introducing ~5% random amino
 acid substitutions, with independent back-translation to nucleotide. This
 guarantees reciprocal BLAST hits exist while simulating real between-species
@@ -34,8 +39,13 @@ snakemake --snakefile workflow/Snakefile \
 
 Expected outputs:
 - `test/output/results/dnds_output.tsv` — dN/dS table
-- `test/output/results/plots/` — four PDF figures (boxplot, violin, scatter, summary)
-- `test/output/results/tables/` — ten TSV gene-list files
+- `test/output/results/plots/` — five PDF figures (boxplot, violin, scatter, functional summary, pseudogene evidence)
+- `test/output/results/tables/` — eleven TSV gene-list files (ten from
+  functional classification, plus `genes_ds_saturated.tsv`)
+- `test/output/results/tables/genes_degenerate_annotated.tsv` — pseudogene sequence evidence
+- `test/output/results/run_summary.pdf` — one-page summary of the whole run;
+  the fastest way to confirm the toolchain ran end to end without opening
+  every individual file
 
 > **Note on plots with test data:** the test sequences are back-translations
 > of proteins so dS values will be near zero. All genes will fall into the
@@ -43,6 +53,13 @@ Expected outputs:
 > PDFs with a message explaining this. This is expected — the test validates
 > the toolchain end to end, not the biological output. Run with real data
 > to produce meaningful plots and tables.
+>
+> The same applies downstream: with no genes classified as "Degenerate"
+> (ω ≥ 1), `genes_degenerate.tsv` and `genes_degenerate_annotated.tsv` will
+> be empty and `pseudogene_evidence.pdf` will show a placeholder message
+> rather than real evidence counts. `run_summary.pdf` will still generate
+> normally and correctly report zero degenerate candidates — it's designed
+> to handle this case gracefully, not treat it as a failure.
 
 The test uses **Mode B** (pre-made FAA + FNA), so CDS extraction and
 translation are skipped automatically. No genome assembly or GFF file is needed.

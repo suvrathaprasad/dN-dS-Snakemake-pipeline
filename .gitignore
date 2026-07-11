@@ -6,6 +6,13 @@
 results/
 output/
 
+# Cached FASTA byte-offset indexes (extract_gene_pair.py). These are
+# written next to whichever FASTA file they index — in Mode B/C that's
+# the user's own input FNA/FAA, which may live outside output/ (e.g.
+# test/data/ for the bundled test dataset). Safe to delete; rebuilt
+# automatically on the next run.
+*.offset_idx.json
+
 # Local config overrides with real data paths — never commit these.
 # config/config.yaml itself stays tracked as a template with placeholder
 # paths; use config.local.yaml or any config_*.yaml (except test configs)

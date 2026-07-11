@@ -20,6 +20,9 @@ blast:
 mafft:
   threads: 4
 
+# dS saturation threshold (standard field value)
+dS_saturation_threshold: 2.0
+
 # Tool switches — defaults shown here. Since this test uses Mode B,
 # cds_extraction is not used. Try switching search_method or trimmer
 # to test the alternative tools end to end.

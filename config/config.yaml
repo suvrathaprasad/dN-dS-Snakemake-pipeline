@@ -70,6 +70,13 @@ blast:
 mafft:
   threads: 6
 
+# --- dS saturation threshold -------------------------------------------------
+# Synonymous sites approach saturation above this value. Gene pairs with
+# dS > threshold are flagged in tables/genes_ds_saturated.tsv and in the
+# run summary. dN/dS estimates for saturated pairs should be interpreted
+# with caution. The standard threshold in the field is 2.0.
+dS_saturation_threshold: 2.0
+
 # --- Tool switches -----------------------------------------------------------
 # Each setting has a default (the first option listed) and an alternative.
 # Change only the tools you want to switch; others will use the default.

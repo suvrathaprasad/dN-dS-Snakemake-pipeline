@@ -4,6 +4,30 @@ collate_results.py — Snakemake script directive for collating codeml outputs.
 Parses all per-gene codeml output files and writes a single TSV.
 Skips genes where Gblocks trimmed the entire alignment (sentinel files)
 without failing the pipeline.
+
+Gene pairs are excluded from dnds_output.tsv for three distinct reasons,
+which are counted and reported separately rather than lumped into one
+"skipped" total:
+
+  - sentinel   — the trimmer legitimately removed the whole alignment
+                 (expected, benign, see run_trimmer.py)
+  - unparsed   — the codeml output file didn't have the expected structure
+                 (no pairwise-comparison section, or no gene-pair/t= line
+                 found) — usually means codeml itself failed or produced
+                 something unexpected
+  - bad_labels — a "t=" line was found, but the tokens immediately before
+                 the dN/dS, dN and dS values weren't the labels we expect
+                 at those fixed positions. The value extraction below
+                 relies on codeml's pairwise output always tokenising to
+                 the same fixed positions (a known PAML fragility point);
+                 this check makes sure that assumption still holds before
+                 trusting the numbers, rather than silently writing
+                 misaligned values into the results table.
+
+Only "sentinel" is an expected, silent outcome. "unparsed" and
+"bad_labels" are logged with the offending file/line so a real problem
+(bad install, PAML version drift, etc.) doesn't get mistaken for normal
+trimming attrition.
 """
 
 # =============================================================================
@@ -19,36 +43,53 @@ import re
 from pathlib import Path
 
 # ── Snakemake-injected objects ────────────────────────────────────────────────
-input_files = list(snakemake.input)
-output_file = Path(snakemake.output[0])
-trimmer     = snakemake.config.get("tools", {}).get("trimmer", "gblocks")
+input_files  = list(snakemake.input)
+output_file  = Path(snakemake.output[0])
+sat_tsv      = Path(snakemake.output[1])
+trimmer      = snakemake.config.get("tools", {}).get("trimmer", "gblocks")
+ds_sat_threshold = float(
+    snakemake.config.get("dS_saturation_threshold", 2.0)
+)
 
 output_file.parent.mkdir(parents=True, exist_ok=True)
+
+# Expected labels immediately preceding the values we pull out of codeml's
+# "t= ... dN/dS= ... dN = ... dS = ..." line, once all "=" signs are
+# stripped and the line is split on whitespace. See parse_codeml().
+EXPECTED_LABELS = {6: "dN/dS", 8: "dN", 10: "dS"}
 
 
 def parse_codeml(path: str):
     """
     Parse a single codeml output file.
-    Returns list of (gene1, gene2, t, dN, dS, dNdS) tuples,
-    or empty list if the file is a skip sentinel or unparseable.
+
+    Returns (rows, reason) where rows is a list of
+    (gene1, gene2, t, dN, dS, dNdS) tuples (empty if nothing was parsed),
+    and reason is None on success or one of "sentinel", "unparsed",
+    "bad_labels" describing why nothing was parsed.
     """
     try:
         with open(path) as fh:
             text = fh.read()
-    except OSError:
-        return []
+    except OSError as exc:
+        return [], f"unparsed (could not read file: {exc})"
 
-    # Skip sentinel files written when the trimmer removed all positions
+    # Skip sentinel files written when the trimmer removed all positions —
+    # this is the normal, expected "nothing to parse" case.
     if text.strip().startswith("Skipped:"):
-        return []
+        return [], "sentinel"
 
     results = []
     status = False
     gene1 = gene2 = None
+    saw_pairwise_section = False
+    saw_t_line = False
+    bad_label_line = None
 
     for line in text.splitlines():
         if line.startswith("pairwise comparison, codon frequencies"):
             status = True
+            saw_pairwise_section = True
 
         if status:
             if line and line[0].isdigit():
@@ -62,8 +103,23 @@ def parse_codeml(path: str):
                     continue
 
             if line.startswith("t=") and gene1 and gene2:
+                saw_t_line = True
                 clean = re.sub(r"=", "", line)
                 tokens = re.split(r"\s+", clean.strip())
+
+                # Validate the fixed-position labels before trusting the
+                # values next to them — protects against silently writing
+                # misaligned numbers if codeml's output format ever shifts.
+                mismatches = [
+                    f"tokens[{idx}]='{tokens[idx] if idx < len(tokens) else '<missing>'}' "
+                    f"(expected '{label}')"
+                    for idx, label in EXPECTED_LABELS.items()
+                    if idx >= len(tokens) or tokens[idx] != label
+                ]
+                if mismatches:
+                    bad_label_line = f"{line.strip()}  [{'; '.join(mismatches)}]"
+                    continue
+
                 try:
                     t    = tokens[1]
                     dnds = tokens[7]
@@ -73,22 +129,41 @@ def parse_codeml(path: str):
                 except IndexError:
                     continue
 
-    return results
+    if results:
+        return results, None
+    if bad_label_line:
+        return [], f"bad_labels ({bad_label_line})"
+    if not saw_pairwise_section:
+        return [], "unparsed (no 'pairwise comparison' section found)"
+    if not saw_t_line:
+        return [], "unparsed (pairwise section found, but no 't=' line)"
+    return [], "unparsed (unknown reason)"
 
 
 # ── Collate ───────────────────────────────────────────────────────────────────
 rows = []
-skipped = 0
+n_sentinel = 0
+n_unparsed = 0
+unparsed_details = []
 
 for f in input_files:
-    parsed = parse_codeml(f)
-    if not parsed:
-        skipped += 1
-    else:
+    parsed, reason = parse_codeml(f)
+    if parsed:
         rows.extend(parsed)
+    elif reason == "sentinel":
+        n_sentinel += 1
+    else:
+        n_unparsed += 1
+        unparsed_details.append((f, reason))
 
 tool_label = "Gblocks" if trimmer == "gblocks" else "trimAl"
-print(f"[collate_results] Parsed {len(rows)} gene pairs, skipped {skipped} (empty alignment after {tool_label})")
+print(f"[collate_results] Parsed {len(rows)} gene pairs")
+print(f"[collate_results]   {n_sentinel} skipped — empty alignment after {tool_label} (expected)")
+if n_unparsed:
+    print(f"[collate_results]   {n_unparsed} skipped — codeml output did NOT match the expected "
+          f"format (unexpected — see details below):")
+    for f, reason in unparsed_details:
+        print(f"[collate_results]     {f}: {reason}")
 
 with open(output_file, "w") as fh:
     fh.write("Gene_query\tGene_target\tt\tdN\tdS\tdNdS\n")
@@ -96,3 +171,72 @@ with open(output_file, "w") as fh:
         fh.write(f"{gene1}\t{gene2}\t{t}\t{dn}\t{ds}\t{dnds}\n")
 
 print(f"[collate_results] Written: {output_file}")
+
+# ── dS saturation check ───────────────────────────────────────────────────────
+# Synonymous sites approach saturation at dS > threshold (default 2.0).
+# At high dS, multiple substitutions at the same site become likely,
+# making dS an unreliable proxy for divergence time and dN/dS estimates
+# potentially unreliable. These genes are flagged but kept in dnds_output.tsv.
+saturated = []
+for gene1, gene2, t, dn, ds, dnds in rows:
+    try:
+        if float(ds) > ds_sat_threshold:
+            saturated.append((gene1, gene2, t, dn, ds, dnds))
+    except ValueError:
+        pass
+
+sat_tsv.parent.mkdir(parents=True, exist_ok=True)
+with open(sat_tsv, "w") as fh:
+    fh.write("Gene_query\tGene_target\tt\tdN\tdS\tdNdS\n")
+    for row in saturated:
+        fh.write("\t".join(row) + "\n")
+
+if saturated:
+    print(
+        f"[collate_results] WARNING: {len(saturated)} gene pair(s) have "
+        f"dS > {ds_sat_threshold} (synonymous saturation threshold). "
+        f"dN/dS estimates for these genes may be unreliable. "
+        f"See: {sat_tsv}"
+    )
+else:
+    print(f"[collate_results] No genes exceed dS saturation threshold ({ds_sat_threshold})")
+
+print(f"[collate_results] Saturation check written: {sat_tsv}")
+
+with open(output_file, "w") as fh:
+    fh.write("Gene_query\tGene_target\tt\tdN\tdS\tdNdS\n")
+    for gene1, gene2, t, dn, ds, dnds in rows:
+        fh.write(f"{gene1}\t{gene2}\t{t}\t{dn}\t{ds}\t{dnds}\n")
+
+print(f"[collate_results] Written: {output_file}")
+
+# ── dS saturation check ───────────────────────────────────────────────────────
+# Synonymous sites approach saturation at dS > threshold (default 2.0).
+# At high dS, multiple substitutions at the same site become likely,
+# making dS an unreliable proxy for divergence time and dN/dS estimates
+# potentially unreliable. These genes are flagged but kept in dnds_output.tsv.
+saturated = []
+for gene1, gene2, t, dn, ds, dnds in rows:
+    try:
+        if float(ds) > ds_sat_threshold:
+            saturated.append((gene1, gene2, t, dn, ds, dnds))
+    except ValueError:
+        pass
+
+sat_tsv.parent.mkdir(parents=True, exist_ok=True)
+with open(sat_tsv, "w") as fh:
+    fh.write("Gene_query\tGene_target\tt\tdN\tdS\tdNdS\n")
+    for row in saturated:
+        fh.write("\t".join(row) + "\n")
+
+if saturated:
+    print(
+        f"[collate_results] WARNING: {len(saturated)} gene pair(s) have "
+        f"dS > {ds_sat_threshold} (synonymous saturation threshold). "
+        f"dN/dS estimates for these genes may be unreliable. "
+        f"See: {sat_tsv}"
+    )
+else:
+    print(f"[collate_results] No genes exceed dS saturation threshold ({ds_sat_threshold})")
+
+print(f"[collate_results] Saturation check written: {sat_tsv}")

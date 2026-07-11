@@ -73,7 +73,9 @@ with open(ctl_out, "w") as fh:
         elif stripped.startswith("outfile"):
             fh.write(f"outfile = {local_out}\n")
         else:
-            # Strip inline comments from all other lines too, just to be safe
+            # All other lines (including PAML's own inline '*' comments)
+            # are written through unchanged — codeml ignores anything
+            # after '*' itself, so no extra stripping is needed here.
             fh.write(line)
 
 log(f"Running codeml in {workdir}")

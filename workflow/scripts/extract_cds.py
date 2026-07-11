@@ -70,4 +70,12 @@ with open(log_path, "w") as log:
 if result.returncode != 0:
     sys.exit(f"{tool} failed. Check {log_path} for details.")
 
+if not Path(output).exists() or Path(output).stat().st_size == 0:
+    sys.exit(
+        f"{tool} exited successfully (code 0) but produced no output "
+        f"(or an empty file) at {output}. Check {log_path} for details — "
+        f"this usually means the GFF and FASTA don't match (wrong "
+        f"chromosome/contig names, mismatched assembly versions, etc.)."
+    )
+
 print(f"[extract_cds] {tool} completed → {output}")

@@ -51,11 +51,14 @@ import numpy as np
 import pandas as pd
 
 # ── Snakemake-injected objects ────────────────────────────────────────────────
-input_tsv  = snakemake.input.tsv
-plots_dir  = Path(snakemake.params.plots_dir)
-tables_dir = Path(snakemake.params.tables_dir)
-diag_tol   = float(snakemake.params.get("diagonal_tolerance", 0.10))
-log_path   = Path(snakemake.log[0])
+input_tsv        = snakemake.input.tsv
+plots_dir        = Path(snakemake.params.plots_dir)
+tables_dir       = Path(snakemake.params.tables_dir)
+diag_tol         = float(snakemake.params.get("diagonal_tolerance", 0.10))
+ds_sat_threshold = float(
+    snakemake.config.get("dS_saturation_threshold", 2.0)
+)
+log_path         = Path(snakemake.log[0])
 
 out_box        = snakemake.output.boxplot
 out_violin     = snakemake.output.violin
@@ -428,6 +431,14 @@ ax.set_ylim(bottom=0, top=dn_clip)
 ax.set_xlabel("dS (synonymous substitution rate)", fontsize=12)
 ax.set_ylabel("dN (non-synonymous substitution rate)", fontsize=12)
 ax.set_title("dN vs dS — Scatter Plot", fontsize=14, fontweight="bold")
+
+# dS saturation threshold vertical line
+# Drawn if it falls within the display window; otherwise noted in annotation
+if ds_sat_threshold <= ds_clip:
+    ax.axvline(x=ds_sat_threshold, color="#FF6F00", linewidth=1.3,
+               linestyle=":", zorder=5,
+               label=f"dS saturation threshold ({ds_sat_threshold})")
+
 ax.legend(fontsize=9, loc="upper left", framealpha=0.9)
 ax.spines[["top", "right"]].set_visible(False)
 
@@ -435,6 +446,12 @@ notes = []
 if n_clipped_scatter > 0:
     notes.append(f"{n_clipped_scatter} gene(s) outside display window "
                  f"(dS>{ds_clip:.3g} or dN>{dn_clip:.3g}) shown as ▲")
+if ds_sat_threshold > ds_clip:
+    notes.append(
+        f"dS saturation threshold ({ds_sat_threshold}) is outside the "
+        f"display window (dS clip={ds_clip:.3g}) — "
+        f"see genes_ds_saturated.tsv for flagged genes"
+    )
 if len(undef) > 0:
     notes.append(f"{len(undef)} gene(s) with dS=0 excluded (see genes_undefined_ds.tsv)")
 if notes:

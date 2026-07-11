@@ -44,6 +44,8 @@ Output structure:
     plots/dnds_scatter.pdf                dN vs dS scatter
     plots/functional_summary.pdf          Gene category bar chart
     plots/pseudogene_evidence.pdf         Pseudogene evidence chart
+    tables/genes_ds_saturated.tsv        Genes with dS > saturation threshold
+    run_summary.pdf                      Full run summary report
     tables/genes_conserved.tsv            ω < 0.5
     tables/genes_relaxed.tsv              0.5 ≤ ω < 1
     tables/genes_degenerate.tsv           ω ≥ 1
@@ -72,6 +74,7 @@ Steps:
   10. Parse and collate results (collate_results.py)
   11. Visualisation and functional classification (plot_results.py)
   12. Pseudogene sequence evidence check (check_pseudogenes.py)
+  13. Run summary report (write_summary.py)
 """
 
 # =============================================================================
@@ -92,7 +95,8 @@ configfile: "config/config.yaml"
 QUERY_PREFIX  = config["query"]["prefix"]
 TARGET_PREFIX = config["target"]["prefix"]
 OUTDIR        = config["outdir"]
-EVALUE_CUTOFF = config["blast"]["evalue"]
+EVALUE_CUTOFF    = config["blast"]["evalue"]
+DS_SAT_THRESHOLD = float(config.get("dS_saturation_threshold", 2.0))
 INTER         = f"{OUTDIR}/intermediate"
 RESULTS       = f"{OUTDIR}/results"
 
@@ -175,12 +179,14 @@ def get_genes(wildcards):
 rule all:
     input:
         f"{RESULTS}/dnds_output.tsv",
+        f"{RESULTS}/tables/genes_ds_saturated.tsv",
         f"{RESULTS}/plots/dnds_boxplot.pdf",
         f"{RESULTS}/plots/dnds_violin.pdf",
         f"{RESULTS}/plots/dnds_scatter.pdf",
         f"{RESULTS}/plots/functional_summary.pdf",
         f"{RESULTS}/tables/genes_degenerate_annotated.tsv",
-        f"{RESULTS}/plots/pseudogene_evidence.pdf"
+        f"{RESULTS}/plots/pseudogene_evidence.pdf",
+        f"{RESULTS}/run_summary.pdf"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 1 — Extract CDS from genome + GFF [Mode A only]
@@ -429,7 +435,8 @@ rule collate_results:
     input:
         all_codeml_outputs
     output:
-        f"{RESULTS}/dnds_output.tsv"
+        f"{RESULTS}/dnds_output.tsv",
+        f"{RESULTS}/tables/genes_ds_saturated.tsv"
     script:
         "scripts/collate_results.py"
 
@@ -481,3 +488,36 @@ rule check_pseudogenes:
         "../envs/plotting.yaml"
     script:
         "scripts/check_pseudogenes.py"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 13 — Run summary report (write_summary.py)
+#
+# Collates key statistics from all previous steps into a single PDF report:
+# run metadata, gene pair counts at each filter stage, dN/dS summary
+# statistics, functional classification, dS saturation, and pseudogene
+# evidence. Runs after all other steps are complete.
+# ─────────────────────────────────────────────────────────────────────────────
+rule write_summary:
+    input:
+        dnds_tsv      = f"{RESULTS}/dnds_output.tsv",
+        saturated_tsv = f"{RESULTS}/tables/genes_ds_saturated.tsv",
+        annotated_tsv = f"{RESULTS}/tables/genes_degenerate_annotated.tsv",
+        rbh_tsv       = f"{INTER}/rbh_pairs.tsv"
+    output:
+        f"{RESULTS}/run_summary.pdf"
+    params:
+        query_prefix     = QUERY_PREFIX,
+        target_prefix    = TARGET_PREFIX,
+        query_mode       = QUERY_MODE,
+        target_mode      = TARGET_MODE,
+        cds_tool         = CDS_TOOL,
+        search_method    = SEARCH_METHOD,
+        trimmer          = TRIMMER,
+        evalue           = EVALUE_CUTOFF,
+        ds_sat_threshold = DS_SAT_THRESHOLD
+    log:
+        f"{OUTDIR}/logs/write_summary.log"
+    conda:
+        "../envs/plotting.yaml"
+    script:
+        "scripts/write_summary.py"

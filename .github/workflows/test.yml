@@ -1,0 +1,108 @@
+name: Pipeline smoke test
+
+# Runs the bundled test dataset (test/config_test.yaml, Mode B) end to end
+# on every push and pull request against main. This is a smoke test, not a
+# correctness test — the test sequences are back-translations of proteins
+# so dS values are near zero and biological output is meaningless (see
+# test/README.md) — but it catches exactly the class of regression that's
+# easy to introduce silently: a broken rule wiring, a script that now
+# raises on real data, a missing output, etc.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:   # allow manual re-runs from the Actions tab
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -l {0}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Miniforge (conda + mamba)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          channels: conda-forge,bioconda,defaults
+          channel-priority: strict
+          activate-environment: snakemake-ci
+
+      - name: Cache per-rule conda environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.conda/envs
+          key: >-
+            ${{ runner.os }}-conda-envs-${{ hashFiles('workflow/envs/*.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-conda-envs-
+
+      - name: Install Snakemake
+        run: mamba install -n snakemake-ci -y -c conda-forge -c bioconda "snakemake>=7" mamba
+
+      - name: Run pipeline on the bundled test dataset
+        run: |
+          snakemake --snakefile workflow/Snakefile \
+                    --configfile test/config_test.yaml \
+                    --use-conda \
+                    --conda-frontend mamba \
+                    --cores 2 \
+                    --rerun-incomplete
+
+      - name: Verify expected outputs exist and are non-empty
+        run: |
+          set -e
+          missing=0
+          for f in \
+            test/output/results/dnds_output.tsv \
+            test/output/results/tables/genes_ds_saturated.tsv \
+            test/output/results/plots/dnds_boxplot.pdf \
+            test/output/results/plots/dnds_violin.pdf \
+            test/output/results/plots/dnds_scatter.pdf \
+            test/output/results/plots/functional_summary.pdf \
+            test/output/results/plots/pseudogene_evidence.pdf \
+            test/output/results/tables/genes_degenerate_annotated.tsv \
+            test/output/results/run_summary.pdf \
+          ; do
+            if [ ! -s "$f" ]; then
+              echo "::error::Expected output missing or empty: $f"
+              missing=1
+            else
+              echo "OK: $f ($(stat -c%s "$f" 2>/dev/null || stat -f%z "$f") bytes)"
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::One or more expected outputs were missing — see above."
+            exit 1
+          fi
+          echo "All expected outputs present and non-empty."
+
+      - name: Check dnds_output.tsv has the expected columns
+        run: |
+          set -e
+          header=$(head -1 test/output/results/dnds_output.tsv)
+          for col in Gene_query Gene_target t dN dS dNdS pident query_coverage target_coverage; do
+            echo "$header" | grep -qw "$col" || {
+              echo "::error::dnds_output.tsv is missing expected column: $col"
+              exit 1
+            }
+          done
+          echo "dnds_output.tsv header OK: $header"
+
+      - name: Upload run outputs as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-run-outputs
+          path: |
+            test/output/results/run_summary.pdf
+            test/output/results/dnds_output.tsv
+            test/output/logs/
+          if-no-files-found: warn
+          retention-days: 14

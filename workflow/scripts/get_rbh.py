@@ -14,6 +14,9 @@ Steps:
   5. Find reciprocal best hits (RBH)
   6. Filter by e-value and minimum coverage of the shorter sequence
   7. Write TSV: Query TAB Target TAB eValue TAB bitScore TAB pident
+     TAB query_coverage TAB target_coverage (query/target coverage are the
+     same %-of-shorter-sequence values used for the coverage filter above,
+     kept in the output as alignment-quality flags rather than discarded)
 
 Usage:
   python3 get_rbh.py \
@@ -159,13 +162,19 @@ def parse_hits(path: str, min_cov: float) -> dict:
 
 def find_rbh(fwd: dict, rev: dict, max_evalue: float) -> list:
     """
-    Return RBH pairs sorted by bitscore descending.
+    Return RBH pairs sorted by bitscore descending. Each pair carries its
+    query/target coverage alongside evalue/bitscore/pident — these were
+    already computed for the coverage filter in parse_hits() and are kept
+    here (rather than discarded) so they can be reported as alignment
+    quality flags alongside the final dN/dS table, letting a reviewer
+    sanity-check whether an outlier ω is riding on a well-covered alignment
+    or a marginal/partial one.
     """
     rbh = []
     for query, (target, evalue, bitscore, pident, qcov, scov) in fwd.items():
         if target in rev and rev[target][0] == query:
             if evalue <= max_evalue:
-                rbh.append((query, target, evalue, bitscore, pident))
+                rbh.append((query, target, evalue, bitscore, pident, qcov, scov))
     rbh.sort(key=lambda x: -x[3])
     return rbh
 
@@ -239,9 +248,9 @@ def main():
         )
 
     with open(args.out, "w") as fh:
-        fh.write("Query\tTarget\teValue\tbitScore\tpident\n")
-        for query, target, evalue, bitscore, pident in rbh:
-            fh.write(f"{query}\t{target}\t{evalue}\t{bitscore}\t{pident:.2f}\n")
+        fh.write("Query\tTarget\teValue\tbitScore\tpident\tquery_coverage\ttarget_coverage\n")
+        for query, target, evalue, bitscore, pident, qcov, scov in rbh:
+            fh.write(f"{query}\t{target}\t{evalue}\t{bitscore}\t{pident:.2f}\t{qcov:.2f}\t{scov:.2f}\n")
 
     print(f"[get_rbh] Written: {args.out}")
 

@@ -1,64 +1,68 @@
 # dN/dS Pipeline
 
+[![Pipeline smoke test](https://github.com/suvrathaprasad/dN-dS-Snakemake-pipeline/actions/workflows/test.yml/badge.svg)](https://github.com/suvrathaprasad/dN-dS-Snakemake-pipeline/actions/workflows/test.yml)
+
 A reproducible Snakemake pipeline for estimating **pairwise synonymous (dS) and non-synonymous (dN) substitution rates** between two species, starting from genome assemblies, CDS nucleotide sequences, or pre-translated protein files.
 
 **Author:** Suvratha Jayaprasad  
 **Contact:** [suvrathaprasad.github.io](https://suvrathaprasad.github.io/index.html) — for questions, bug reports, or collaboration enquiries, please use the contact form on the website.  
 **License:** [CC BY-NC-ND 4.0](https://creativecommons.org/licenses/by-nc-nd/4.0/) — you may use and share this pipeline with attribution, but you may not modify it or use it for commercial purposes. See `LICENSE` for full terms.  
 **Citation:** If you use this pipeline, please cite this repository and the tools it wraps (see [Dependencies](#dependencies)):
-> Jayaprasad, S. (2025). *dN/dS Pipeline*. GitHub. https://github.com/suvrathaprasad/dnds_pipeline
+> Jayaprasad, S. (2025). *dN/dS Pipeline*. GitHub. https://github.com/suvrathaprasad/dN-dS-Snakemake-pipeline
 
 ---
 
 ## Overview
 
 ```
- ┌─ Mode A: Genome + GFF ──────┐   ┌─ Mode B: FAA + FNA ──────┐   ┌─ Mode C: FNA only ───────┐
- │                             │   │                          │   │                          │
- │  Anchorwave or gffread      │   │  (skip extraction and    │   │  EMBOSS transeq          │
- │    Extract CDS per species  │   │     translation)         │   │    Translate → protein   │
- │      │                      │   │                          │   │                          │
- │      ▼                      │   │                          │   │                          │
- │  EMBOSS transeq → Protein   │   │                          │   │                          │
- └──────────────┬──────────────┘   └────────────┬─────────────┘   └────────────┬─────────────┘
-                │                               │                              │
-                └──────────────────────────┬────┴──────────────────────────────┘
-                                           │
-                                           ▼
-          BLAST+ or DIAMOND   Bidirectional search + Reciprocal Best Hits
-                                           │
-                                           ▼
-          extract_gene_pair.py   Per-gene-pair FAA + FNA extraction
-                                           │
-                                           ▼
-          MAFFT                  Protein alignment per gene pair
-                                           │
-                                           ▼
-          pal2nal                Back-translate → codon alignment
-                                           │
-                                           ▼
-          Gblocks or trimAl      Trim poorly aligned regions
-                                           │
-                                           ▼
-          PAML codeml            Pairwise dN/dS (runmode = -2)
-                                           │
-                                           ▼
-          collate_results.py     Parse codeml output + dS saturation check
-                                           │
-                                           ▼
-          output/results/dnds_output.tsv + plots/ + tables/
-                                           │
-                                           ▼
-          check_pseudogenes.py   Premature stop & frameshift screen
-                                           │
-                                           ▼
-          genes_degenerate_annotated.tsv + pseudogene_evidence.pdf
-                                           │
-                                           ▼
-          write_summary.py       Collate everything into one report
-                                           │
-                                           ▼
-                             output/results/run_summary.pdf
+ ┌─ Mode A: Genome + GFF ───────────────┐   ┌─ Mode B: FAA + FNA (pre-made) ───────┐
+ │                                      │   │                                      │
+ │  Anchorwave or gffread               │   │  (skip extraction + translation)     │
+ │    Extract CDS per species           │   │                                      │
+ │      │                               │   └──────────────────┬───────────────────┘
+ │      ▼                               │                      │
+ │  EMBOSS transeq  Translate → protein │   ┌─ Mode C: FNA only ───────────────────┐
+ │                                      │   │                                      │
+ └──────────────────┬───────────────────┘   │  EMBOSS transeq  Translate → protein │
+                    │                       │                                      │
+                    └──────────────┬────────┴──────────────────────────────────────┘
+                                   │
+                                   ▼
+               BLAST+ or DIAMOND   Bidirectional search + Reciprocal Best Hits
+                                   │
+                                   ▼
+               extract_gene_pair.py  Per-gene-pair FAA + FNA extraction
+                                   │
+                                   ▼
+               MAFFT               Protein alignment per gene pair
+                                   │
+                                   ▼
+               pal2nal             Back-translate → codon alignment
+                                   │
+                                   ▼
+               Gblocks or trimAl   Trim poorly aligned regions
+                                   │
+                                   ▼
+               PAML codeml         Pairwise dN/dS (runmode = -2)
+                                   │
+                                   ▼
+               collate_results.py  Parse codeml output + dS saturation check
+                                   │
+                                   ▼
+               output/results/dnds_output.tsv + plots/ + tables/
+                                   │
+                                   ▼
+               check_pseudogenes.py  Premature stop & frameshift screen
+                                   │
+                                   ▼
+               genes_degenerate_annotated.tsv + pseudogene_evidence.pdf
+                                   │
+                                   ▼
+               write_summary.py    Collate everything into one report
+                                   │
+                                   ▼
+               output/results/run_summary.pdf
+
 ```
 
 **Why RBH and not OrthoFinder?** For strict pairwise dN/dS between two species, RBH identifies one-to-one orthologs more directly and with less overhead. OrthoFinder is designed for multi-species ortholog inference and produces many-to-many groups that require additional filtering for pairwise analyses.
@@ -118,6 +122,19 @@ Tab-separated, one row per orthologous gene pair:
 | dN          | Non-synonymous substitution rate     |
 | dS          | Synonymous substitution rate         |
 | dNdS        | ω = dN/dS                            |
+| pident      | Protein-level percent identity from the RBH search |
+| query_coverage  | % of the query protein covered by the aligned region |
+| target_coverage | % of the target protein covered by the aligned region |
+
+The last three columns are carried over from the RBH search
+(`intermediate/rbh_pairs.tsv`) rather than computed from the final codon
+alignment. They're a quick way to sanity-check a surprising ω value —
+an outlier dN/dS on a pair with low identity or partial coverage is more
+likely to reflect a marginal alignment than genuine selection, and is
+worth a manual look before drawing conclusions from it. These same three
+columns are carried through to every derived table in
+`results/tables/` (`genes_degenerate.tsv`, `genes_conserved.tsv`, etc.)
+since they're all filtered subsets of this same table.
 
 ---
 
@@ -134,8 +151,8 @@ All other dependencies are installed automatically per-rule via the `envs/` cond
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/suvrathaprasad/dnds_pipeline.git
-cd dnds_pipeline
+git clone https://github.com/suvrathaprasad/dN-dS-Snakemake-pipeline.git
+cd dN-dS-Snakemake-pipeline
 
 # 2. Install Snakemake (if not already installed)
 conda create -n snakemake -c conda-forge -c bioconda snakemake mamba
@@ -225,6 +242,24 @@ snakemake --snakefile workflow/Snakefile \
           --default-resources slurm_partition=standard mem_mb=8000 runtime=120
 ```
 
+### Config validation
+
+Before any rule runs, the Snakefile checks `config.yaml` for common
+mistakes — missing/typo'd file paths, `blast.min_cov` outside 0–100,
+non-positive `blast.evalue` or `dS_saturation_threshold`, prefixes
+containing spaces or path separators, non-integer thread counts — and
+reports every problem it finds in one pass rather than stopping at the
+first one:
+
+```
+Config validation failed — fix the following in config.yaml before running:
+  query.fna does not exist: 'path/to/species1.fna'
+  blast.min_cov = 150 — must be between 0 and 100
+```
+
+This catches typos immediately instead of, say, 40 minutes into a BLAST
+run because a genome path was misspelled.
+
 ---
 
 ## Test dataset
@@ -241,6 +276,16 @@ snakemake --snakefile workflow/Snakefile \
 Expected output: `test/output/results/dnds_output.tsv`
 
 > **Note:** The test nucleotide sequences are back-translations of the protein sequences, so dS will be near zero. The test is for toolchain verification, not biological interpretation.
+
+### Continuous integration
+
+`.github/workflows/test.yml` runs this same test dataset end to end on
+every push and pull request against `main` — it's a smoke test (catches
+broken rule wiring, a script that now raises on real data, a missing
+output) rather than a correctness test, for the same reason the test
+data itself isn't biologically meaningful. `run_summary.pdf` and
+`dnds_output.tsv` from each CI run are kept as downloadable workflow
+artifacts for 14 days.
 
 ---
 
@@ -413,6 +458,18 @@ entire run. It includes:
 - Run metadata: species names, resolved input mode and file path(s) for
   each species (the actual `fasta`/`gff`/`faa`/`fna` path(s) used, not
   just the config prefix), tool switches, thresholds
+- Provenance: the pipeline's git commit hash (flagged if the working tree
+  has uncommitted changes), and the actually-installed version of each
+  selected tool (search method, trimmer, MAFFT, codeml) — not just which
+  one `config.yaml` says to use. Each tool's version is recorded by its
+  own rule at the moment it actually runs (see
+  `intermediate/tool_versions.json`), since under `--use-conda` every
+  rule has its own isolated environment and `write_summary.py` itself has
+  no way to see whether blastp/mafft/etc. are even installed by the time
+  it runs. Falls back to a clear "not recorded"/"unavailable" note per
+  tool if that file is missing or incomplete (e.g. a partial rerun),
+  rather than failing. Useful for a methods section or reproducing a run
+  later.
 - Gene pair counts at each filter stage
 - dN, dS, and dN/dS summary statistics (median, mean, min, max)
 - Functional classification breakdown with percentages

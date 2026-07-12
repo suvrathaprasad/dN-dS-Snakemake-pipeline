@@ -40,6 +40,44 @@ def log(msg):
     with open(log_path, "a") as f:
         f.write(msg + "\n")
 
+
+def record_paml_version(codeml_output_path: Path) -> None:
+    """
+    Record PAML's version for write_summary.py's Provenance section.
+    codeml has no --version flag, but every output file it writes starts
+    with a banner line like "CODONML (in paml version 4.9j, ...)" — read
+    that directly from the file we just produced rather than invoking
+    codeml a second time just to ask, which would otherwise mean either
+    parsing an interactive prompt or risking a hang.
+
+    This is a reporting nicety, never allowed to affect the actual
+    codeml step: version_file/record_script are optional (so this script
+    still works standalone/in tests without them configured), and the
+    entire body is wrapped in one try/except so any problem here —
+    including a missing/renamed param, in case a future Snakemake version
+    changes what's available — degrades to a log line rather than ever
+    failing the rule.
+    """
+    try:
+        version_file = snakemake.params.get("version_file", None)
+        record_script = snakemake.params.get("record_script", None)
+        if not version_file or not record_script:
+            return
+        try:
+            first_line = codeml_output_path.read_text().splitlines()[0].strip()
+        except (OSError, IndexError):
+            first_line = ""
+        literal = first_line if "paml version" in first_line.lower() else \
+            "unavailable (codeml output did not start with the expected banner)"
+
+        subprocess.run(
+            ["python3", str(record_script), "--file", str(version_file),
+             "--tool", "codeml", "--literal", literal],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception as exc:
+        log(f"(non-fatal) could not record codeml version: {exc}")
+
 # ── Skip empty alignments (Gblocks trimmed everything) ───────────────────────
 if aln_path.stat().st_size == 0:
     log("Skipped: Gblocks produced empty alignment")
@@ -102,6 +140,7 @@ local_out_path = workdir / local_out
 if local_out_path.exists():
     shutil.copy(local_out_path, out_txt)
     log(f"Output written to {out_txt}")
+    record_paml_version(out_txt)
 else:
     log("ERROR: codeml did not produce output file")
     sys.exit(1)

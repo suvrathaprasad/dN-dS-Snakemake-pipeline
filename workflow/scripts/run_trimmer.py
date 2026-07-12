@@ -64,6 +64,35 @@ def write_log(msg: str, mode: str = "a") -> None:
         f.write(msg + "\n")
 
 
+def record_version(tool_key: str, cmd: str = None, literal: str = None) -> None:
+    """
+    Record this tool's version into the shared tool_versions.json so
+    write_summary.py can report it later — see record_tool_version.py's
+    own docstring for why this has to happen here, where the tool is
+    actually on PATH, rather than from write_summary's own (unrelated)
+    conda environment.
+
+    This is a reporting nicety, never allowed to affect the actual
+    trimming step: version_file/record_script are optional (so this
+    script still works standalone/in tests without them configured), and
+    the entire body is wrapped in one try/except so any problem here —
+    including a missing/renamed param, in case a future Snakemake version
+    changes what's available — degrades to a log line rather than ever
+    failing the rule.
+    """
+    try:
+        version_file = snakemake.params.get("version_file", None)
+        record_script = snakemake.params.get("record_script", None)
+        if not version_file or not record_script:
+            return
+        args = ["python3", str(record_script), "--file", str(version_file),
+                "--tool", tool_key]
+        args += ["--literal", literal] if literal is not None else ["--cmd", cmd]
+        subprocess.run(args, capture_output=True, text=True, timeout=15)
+    except Exception as exc:
+        write_log(f"(non-fatal) could not record {tool_key} version: {exc}")
+
+
 def stash_sidecars(paths: list) -> None:
     """
     Move any of the given files (if they exist) into gene_sidecar_dir instead
@@ -118,6 +147,7 @@ if tool == "gblocks":
     write_log(result.stdout)
     if result.stderr:
         write_log(result.stderr)
+    record_version("gblocks", literal="Gblocks (version not queryable via CLI)")
 
     # Gblocks writes {input}-gb1.fa — move it to the declared output path
     gblocks_out = Path(str(input_aln) + "-gb1.fa")
@@ -151,6 +181,7 @@ elif tool == "trimal":
     write_log(result.stdout)
     if result.stderr:
         write_log(result.stderr)
+    record_version("trimal", cmd="trimal --version")
 
     trimmed_all = sentinel_if_empty("trimAl", result.returncode)
     if not trimmed_all:

@@ -28,6 +28,14 @@ Only "sentinel" is an expected, silent outcome. "unparsed" and
 "bad_labels" are logged with the offending file/line so a real problem
 (bad install, PAML version drift, etc.) doesn't get mistaken for normal
 trimming attrition.
+
+dnds_output.tsv also carries three alignment-quality columns (pident,
+query_coverage, target_coverage) joined in from rbh_pairs.tsv by gene ID.
+These were already computed during the RBH search and coverage filter in
+get_rbh.py but previously discarded afterwards — keeping them lets a
+reviewer sanity-check whether an outlier ω is riding on a well-covered,
+high-identity alignment or a marginal one, without having to separately
+dig through the RBH intermediate file by hand.
 """
 
 # =============================================================================
@@ -43,7 +51,8 @@ import re
 from pathlib import Path
 
 # ── Snakemake-injected objects ────────────────────────────────────────────────
-input_files  = list(snakemake.input)
+input_files  = list(snakemake.input.codeml_outputs)
+rbh_tsv      = snakemake.input.rbh_tsv
 output_file  = Path(snakemake.output[0])
 sat_tsv      = Path(snakemake.output[1])
 trimmer      = snakemake.config.get("tools", {}).get("trimmer", "gblocks")
@@ -52,6 +61,38 @@ ds_sat_threshold = float(
 )
 
 output_file.parent.mkdir(parents=True, exist_ok=True)
+
+
+def load_rbh_lookup(path: str) -> dict:
+    """
+    Read rbh_pairs.tsv into {(query, target): (pident, query_coverage,
+    target_coverage)}. Tolerant of the file having only the original 5
+    columns (older runs / manual edits) — coverage fields are simply
+    unavailable ("NA") in that case rather than raising.
+    """
+    lookup = {}
+    with open(path) as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        col_idx = {name: i for i, name in enumerate(header)}
+        has_cov = "query_coverage" in col_idx and "target_coverage" in col_idx
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split("\t")
+            try:
+                query = parts[col_idx["Query"]]
+                target = parts[col_idx["Target"]]
+                pident = parts[col_idx["pident"]]
+                qcov = parts[col_idx["query_coverage"]] if has_cov else "NA"
+                tcov = parts[col_idx["target_coverage"]] if has_cov else "NA"
+            except (IndexError, KeyError):
+                continue
+            lookup[(query, target)] = (pident, qcov, tcov)
+    return lookup
+
+
+rbh_lookup = load_rbh_lookup(rbh_tsv)
 
 # Expected labels immediately preceding the values we pull out of codeml's
 # "t= ... dN/dS= ... dN = ... dS = ..." line, once all "=" signs are
@@ -93,12 +134,23 @@ def parse_codeml(path: str):
 
         if status:
             if line and line[0].isdigit():
-                # Gene pair line: "1 (gene1...) vs 2 (gene2...)"
+                # Gene pair header line. For a 2-sequence pairwise alignment,
+                # PAML/codeml always prints the HIGHER-indexed sequence
+                # first: "2 (seq2) ... 1 (seq1)", not "1 (seq1) ... 2 (seq2)"
+                # as the token positions might suggest at a glance. Since
+                # extract_gene_pair.py always writes the query as sequence 1
+                # and the target as sequence 2 into the alignment codeml
+                # sees, that means the token right after "1" (parts[4]) is
+                # always the query, and the token right after "2" (parts[1])
+                # is always the target — the reverse of their positions in
+                # the line. Confirmed against real codeml output; this is a
+                # deterministic PAML convention for pairwise mode, not a
+                # per-file quirk needing a conditional check.
                 clean = re.sub(r"[()]", "", line)
                 parts = clean.split()
                 try:
-                    gene1 = parts[1].split("...")[0]
-                    gene2 = parts[4].split("...")[0]
+                    gene1 = parts[4].split("...")[0]  # query  (sequence 1)
+                    gene2 = parts[1].split("...")[0]  # target (sequence 2)
                 except IndexError:
                     continue
 
@@ -144,6 +196,7 @@ def parse_codeml(path: str):
 rows = []
 n_sentinel = 0
 n_unparsed = 0
+n_no_rbh_match = 0
 unparsed_details = []
 
 for f in input_files:
@@ -156,6 +209,21 @@ for f in input_files:
         n_unparsed += 1
         unparsed_details.append((f, reason))
 
+# Join in alignment-quality columns from rbh_pairs.tsv by (gene1, gene2).
+# This should always match — every gene pair reaching codeml originated
+# from an RBH row — so a miss here would indicate an ID mismatch
+# somewhere upstream (e.g. header mangling) rather than a normal outcome,
+# and is worth surfacing rather than silently writing blank columns.
+enriched_rows = []
+for gene1, gene2, t, dn, ds, dnds in rows:
+    quality = rbh_lookup.get((gene1, gene2))
+    if quality is None:
+        n_no_rbh_match += 1
+        pident, qcov, tcov = "NA", "NA", "NA"
+    else:
+        pident, qcov, tcov = quality
+    enriched_rows.append((gene1, gene2, t, dn, ds, dnds, pident, qcov, tcov))
+
 tool_label = "Gblocks" if trimmer == "gblocks" else "trimAl"
 print(f"[collate_results] Parsed {len(rows)} gene pairs")
 print(f"[collate_results]   {n_sentinel} skipped — empty alignment after {tool_label} (expected)")
@@ -164,11 +232,15 @@ if n_unparsed:
           f"format (unexpected — see details below):")
     for f, reason in unparsed_details:
         print(f"[collate_results]     {f}: {reason}")
+if n_no_rbh_match:
+    print(f"[collate_results]   WARNING: {n_no_rbh_match} gene pair(s) parsed from codeml output "
+          f"had no matching row in {rbh_tsv} — alignment quality columns are 'NA' for these. "
+          f"This is unexpected; check for gene ID mismatches upstream.")
 
 with open(output_file, "w") as fh:
-    fh.write("Gene_query\tGene_target\tt\tdN\tdS\tdNdS\n")
-    for gene1, gene2, t, dn, ds, dnds in rows:
-        fh.write(f"{gene1}\t{gene2}\t{t}\t{dn}\t{ds}\t{dnds}\n")
+    fh.write("Gene_query\tGene_target\tt\tdN\tdS\tdNdS\tpident\tquery_coverage\ttarget_coverage\n")
+    for gene1, gene2, t, dn, ds, dnds, pident, qcov, tcov in enriched_rows:
+        fh.write(f"{gene1}\t{gene2}\t{t}\t{dn}\t{ds}\t{dnds}\t{pident}\t{qcov}\t{tcov}\n")
 
 print(f"[collate_results] Written: {output_file}")
 
@@ -178,54 +250,17 @@ print(f"[collate_results] Written: {output_file}")
 # making dS an unreliable proxy for divergence time and dN/dS estimates
 # potentially unreliable. These genes are flagged but kept in dnds_output.tsv.
 saturated = []
-for gene1, gene2, t, dn, ds, dnds in rows:
+for row in enriched_rows:
+    ds = row[4]
     try:
         if float(ds) > ds_sat_threshold:
-            saturated.append((gene1, gene2, t, dn, ds, dnds))
+            saturated.append(row)
     except ValueError:
         pass
 
 sat_tsv.parent.mkdir(parents=True, exist_ok=True)
 with open(sat_tsv, "w") as fh:
-    fh.write("Gene_query\tGene_target\tt\tdN\tdS\tdNdS\n")
-    for row in saturated:
-        fh.write("\t".join(row) + "\n")
-
-if saturated:
-    print(
-        f"[collate_results] WARNING: {len(saturated)} gene pair(s) have "
-        f"dS > {ds_sat_threshold} (synonymous saturation threshold). "
-        f"dN/dS estimates for these genes may be unreliable. "
-        f"See: {sat_tsv}"
-    )
-else:
-    print(f"[collate_results] No genes exceed dS saturation threshold ({ds_sat_threshold})")
-
-print(f"[collate_results] Saturation check written: {sat_tsv}")
-
-with open(output_file, "w") as fh:
-    fh.write("Gene_query\tGene_target\tt\tdN\tdS\tdNdS\n")
-    for gene1, gene2, t, dn, ds, dnds in rows:
-        fh.write(f"{gene1}\t{gene2}\t{t}\t{dn}\t{ds}\t{dnds}\n")
-
-print(f"[collate_results] Written: {output_file}")
-
-# ── dS saturation check ───────────────────────────────────────────────────────
-# Synonymous sites approach saturation at dS > threshold (default 2.0).
-# At high dS, multiple substitutions at the same site become likely,
-# making dS an unreliable proxy for divergence time and dN/dS estimates
-# potentially unreliable. These genes are flagged but kept in dnds_output.tsv.
-saturated = []
-for gene1, gene2, t, dn, ds, dnds in rows:
-    try:
-        if float(ds) > ds_sat_threshold:
-            saturated.append((gene1, gene2, t, dn, ds, dnds))
-    except ValueError:
-        pass
-
-sat_tsv.parent.mkdir(parents=True, exist_ok=True)
-with open(sat_tsv, "w") as fh:
-    fh.write("Gene_query\tGene_target\tt\tdN\tdS\tdNdS\n")
+    fh.write("Gene_query\tGene_target\tt\tdN\tdS\tdNdS\tpident\tquery_coverage\ttarget_coverage\n")
     for row in saturated:
         fh.write("\t".join(row) + "\n")
 

@@ -37,8 +37,14 @@ Output structure:
     input/         Per-gene-pair FAA and FNA files
     aligns/        MAFFT, pal2nal, and trimmed alignments
     codeml/        Per-gene codeml output directories
+    tool_versions.json  Actually-installed version of each selected tool,
+                         recorded by each tool's own rule (see
+                         record_tool_version.py) and read back into
+                         run_summary.pdf's Provenance section
   results/
-    dnds_output.tsv                      Final dN/dS table
+    dnds_output.tsv                      Final dN/dS table (+ pident,
+                                          query_coverage, target_coverage
+                                          from the RBH search, per gene pair)
     plots/dnds_boxplot.pdf                Boxplot of dN, dS, dN/dS
     plots/dnds_violin.pdf                 Violin plot of dN, dS, dN/dS
     plots/dnds_scatter.pdf                dN vs dS scatter
@@ -89,6 +95,8 @@ Steps:
 import os
 import sys
 
+import snakemake as _snakemake_pkg  # only for __version__ — see SNAKEMAKE_VERSION below
+
 configfile: "config/config.yaml"
 
 # ── Derived paths ─────────────────────────────────────────────────────────────
@@ -99,6 +107,34 @@ EVALUE_CUTOFF    = config["blast"]["evalue"]
 DS_SAT_THRESHOLD = float(config.get("dS_saturation_threshold", 2.0))
 INTER         = f"{OUTDIR}/intermediate"
 RESULTS       = f"{OUTDIR}/results"
+
+# Shared file where each tool's rule records its own actually-installed
+# version (see workflow/scripts/record_tool_version.py). Deliberately NOT
+# declared as a formal Snakemake input/output anywhere: it's written to by
+# many different rules over the course of a run (get_rbh once, mafft/
+# run_trimmer/codeml once per gene), and Snakemake doesn't support several
+# rules sharing one declared output. write_summary reads it via params
+# instead — safe in practice because its real declared inputs already
+# transitively depend on every rule below having finished first, so this
+# file is guaranteed fully populated by the time write_summary runs even
+# though Snakemake isn't explicitly tracking that dependency.
+VERSIONS_FILE = f"{INTER}/tool_versions.json"
+
+# Path to the version-recorder script, passed explicitly to every rule that
+# needs it via params (below) rather than having each script try to derive
+# its own location from a snakemake.workflow.basedir-style attribute — that
+# attribute isn't a stable, documented part of the script API across
+# Snakemake versions, and accessing it defensively still isn't as robust as
+# just not needing it in the first place. This mirrors how the existing
+# shell-based rules already reference "workflow/scripts/get_rbh.py" as a
+# plain path relative to the directory snakemake is invoked from.
+RECORD_SCRIPT = "workflow/scripts/record_tool_version.py"
+
+# Captured once, here in the master process that's actually running
+# Snakemake — not via a subprocess call from inside some rule's isolated
+# --use-conda environment, where `snakemake` itself is usually not
+# installed at all and would just report "not found".
+SNAKEMAKE_VERSION = getattr(_snakemake_pkg, "__version__", "unknown")
 
 # ── Tool switches (with defaults) ─────────────────────────────────────────────
 TOOLS         = config.get("tools", {})
@@ -167,6 +203,72 @@ QUERY_FAA  = _resolved_faa("query",  QUERY_PREFIX)
 QUERY_FNA  = _resolved_fna("query",  QUERY_PREFIX)
 TARGET_FAA = _resolved_faa("target", TARGET_PREFIX)
 TARGET_FNA = _resolved_fna("target", TARGET_PREFIX)
+
+# ── Upfront config validation ─────────────────────────────────────────────────
+# Catches common config mistakes (typo'd paths, out-of-range values) before
+# any rule runs, rather than failing partway through a long BLAST/codeml run
+# with a less obvious error. Collects every problem found rather than
+# stopping at the first one, so a person fixing config.yaml can address
+# everything in one pass instead of hitting them one at a time. This checks
+# only the raw, user-supplied paths (config[species]["fasta"/"gff"/"faa"/
+# "fna"]) — not QUERY_FAA/QUERY_FNA/etc. above, which for Mode A are
+# pipeline-derived outputs that don't exist yet at this point and are not
+# supposed to.
+_config_errors = []
+
+
+def _check_file_exists(label, path):
+    if path and not os.path.isfile(path):
+        _config_errors.append(f"  {label} does not exist: '{path}'")
+
+
+for _species, _mode_val in (("query", QUERY_MODE), ("target", TARGET_MODE)):
+    if _mode_val == "A":
+        _check_file_exists(f"{_species}.fasta", config[_species].get("fasta"))
+        _check_file_exists(f"{_species}.gff",   config[_species].get("gff"))
+    elif _mode_val == "B":
+        _check_file_exists(f"{_species}.faa", config[_species].get("faa"))
+        _check_file_exists(f"{_species}.fna", config[_species].get("fna"))
+    elif _mode_val == "C":
+        _check_file_exists(f"{_species}.fna", config[_species].get("fna"))
+
+_min_cov = config["blast"].get("min_cov", 60)
+try:
+    if not (0 <= float(_min_cov) <= 100):
+        _config_errors.append(f"  blast.min_cov = {_min_cov} — must be between 0 and 100")
+except (TypeError, ValueError):
+    _config_errors.append(f"  blast.min_cov = '{_min_cov}' — must be numeric")
+
+try:
+    if float(EVALUE_CUTOFF) <= 0:
+        _config_errors.append(f"  blast.evalue = {EVALUE_CUTOFF} — must be a positive number")
+except (TypeError, ValueError):
+    _config_errors.append(f"  blast.evalue = '{EVALUE_CUTOFF}' — must be numeric")
+
+if DS_SAT_THRESHOLD <= 0:
+    _config_errors.append(
+        f"  dS_saturation_threshold = {DS_SAT_THRESHOLD} — must be a positive number"
+    )
+
+for _label, _prefix_val in (("query.prefix", QUERY_PREFIX), ("target.prefix", TARGET_PREFIX)):
+    if not _prefix_val or any(c in _prefix_val for c in " /\\\t\n"):
+        _config_errors.append(
+            f"  {_label} = '{_prefix_val}' — must be non-empty and contain no "
+            f"spaces or path separators (used directly in output filenames)"
+        )
+
+for _label, _threads_val in (
+    ("blast.threads", config["blast"].get("threads", 1)),
+    ("mafft.threads", config.get("mafft", {}).get("threads", 1)),
+):
+    if not isinstance(_threads_val, int) or _threads_val < 1:
+        _config_errors.append(f"  {_label} = {_threads_val} — must be a positive integer")
+
+if _config_errors:
+    sys.exit(
+        "Config validation failed — fix the following in config.yaml before running:\n"
+        + "\n".join(_config_errors)
+    )
 
 # ── Helper: read gene list once RBH checkpoint is done ───────────────────────
 def get_genes(wildcards):
@@ -297,11 +399,16 @@ checkpoint get_rbh:
         blast_fwd = f"{INTER}/blast/fwd.tsv",
         blast_rev = f"{INTER}/blast/rev.tsv"
     params:
-        evalue  = EVALUE_CUTOFF,
-        threads = config["blast"]["threads"],
-        min_cov = config["blast"].get("min_cov", 60),
-        db_dir  = f"{INTER}/blast/db",
-        method  = SEARCH_METHOD
+        evalue       = EVALUE_CUTOFF,
+        threads      = config["blast"]["threads"],
+        min_cov      = config["blast"].get("min_cov", 60),
+        db_dir       = f"{INTER}/blast/db",
+        method       = SEARCH_METHOD,
+        version_file = VERSIONS_FILE,
+        # Recorded here, where blastp/diamond are actually on PATH — see
+        # VERSIONS_FILE comment above for why write_summary can't discover
+        # this itself under --use-conda.
+        version_cmd  = "blastp -version" if SEARCH_METHOD == "blast" else "diamond version"
     threads:
         config["blast"]["threads"]
     log:
@@ -322,6 +429,11 @@ checkpoint get_rbh:
             --min_cov   {params.min_cov} \
             --threads   {params.threads} \
             > {log} 2>&1
+        python3 workflow/scripts/record_tool_version.py \
+            --file {params.version_file} \
+            --tool {params.method} \
+            --cmd "{params.version_cmd}" \
+            >> {log} 2>&1 || true
         """
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -363,13 +475,19 @@ rule mafft:
     log:
         f"{OUTDIR}/logs/mafft/{{gene}}.log"
     params:
-        threads = config["mafft"]["threads"]
+        threads      = config["mafft"]["threads"],
+        version_file = VERSIONS_FILE
     threads:
         config["mafft"]["threads"]
     conda:
         "../envs/mafft.yaml"
     shell:
-        "mafft --auto --thread {params.threads} {input} > {output} 2>{log}"
+        """
+        mafft --auto --thread {params.threads} {input} > {output} 2>{log}
+        python3 workflow/scripts/record_tool_version.py \
+            --file {params.version_file} --tool mafft --cmd "mafft --version" \
+            >> {log} 2>&1 || true
+        """
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 7 — Codon alignment (pal2nal)
@@ -400,7 +518,9 @@ rule trim_alignment:
     log:
         f"{OUTDIR}/logs/trimmer/{{gene}}.log"
     params:
-        trimmer = TRIMMER
+        trimmer       = TRIMMER,
+        version_file  = VERSIONS_FILE,
+        record_script = RECORD_SCRIPT
     conda:
         "../envs/trimmer.yaml"
     script:
@@ -418,7 +538,9 @@ rule codeml:
     log:
         f"{OUTDIR}/logs/codeml/{{gene}}.log"
     params:
-        workdir = f"{INTER}/codeml/{{gene}}"
+        workdir       = f"{INTER}/codeml/{{gene}}",
+        version_file  = VERSIONS_FILE,
+        record_script = RECORD_SCRIPT
     conda:
         "../envs/paml.yaml"
     script:
@@ -433,7 +555,8 @@ def all_codeml_outputs(wildcards):
 
 rule collate_results:
     input:
-        all_codeml_outputs
+        codeml_outputs = all_codeml_outputs,
+        rbh_tsv        = f"{INTER}/rbh_pairs.tsv"
     output:
         f"{RESULTS}/dnds_output.tsv",
         f"{RESULTS}/tables/genes_ds_saturated.tsv"
@@ -506,15 +629,17 @@ rule write_summary:
     output:
         f"{RESULTS}/run_summary.pdf"
     params:
-        query_prefix     = QUERY_PREFIX,
-        target_prefix    = TARGET_PREFIX,
-        query_mode       = QUERY_MODE,
-        target_mode      = TARGET_MODE,
-        cds_tool         = CDS_TOOL,
-        search_method    = SEARCH_METHOD,
-        trimmer          = TRIMMER,
-        evalue           = EVALUE_CUTOFF,
-        ds_sat_threshold = DS_SAT_THRESHOLD
+        query_prefix      = QUERY_PREFIX,
+        target_prefix     = TARGET_PREFIX,
+        query_mode        = QUERY_MODE,
+        target_mode       = TARGET_MODE,
+        cds_tool          = CDS_TOOL,
+        search_method     = SEARCH_METHOD,
+        trimmer           = TRIMMER,
+        evalue            = EVALUE_CUTOFF,
+        ds_sat_threshold  = DS_SAT_THRESHOLD,
+        version_file      = VERSIONS_FILE,
+        snakemake_version = SNAKEMAKE_VERSION
     log:
         f"{OUTDIR}/logs/write_summary.log"
     conda:

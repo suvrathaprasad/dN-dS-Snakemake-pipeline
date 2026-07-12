@@ -37,7 +37,11 @@ Layout strategy (guaranteed single-page fit):
 #          Full terms: https://creativecommons.org/licenses/by-nc-nd/4.0/
 # =============================================================================
 
+import json
 import math
+import shutil
+import subprocess
+import sys
 import textwrap
 from datetime import datetime
 from pathlib import Path
@@ -80,6 +84,33 @@ log_path.parent.mkdir(parents=True, exist_ok=True)
 cfg = snakemake.config
 query_spec  = cfg.get("query", {})
 target_spec = cfg.get("target", {})
+
+
+def get_git_commit(start_dir) -> str:
+    """
+    Return the short git commit hash of the pipeline repo, flagged if the
+    working tree has uncommitted changes, or a short explanatory string
+    if this isn't a git checkout (e.g. a downloaded tarball) or git isn't
+    installed. Never raises.
+    """
+    if shutil.which("git") is None:
+        return "unavailable (git not installed)"
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(start_dir), capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return "unavailable (not a git checkout)"
+        commit = result.stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(start_dir), capture_output=True, text=True, timeout=10,
+        )
+        suffix = " (+ uncommitted changes)" if dirty.stdout.strip() else ""
+        return f"{commit}{suffix}"
+    except Exception as exc:
+        return f"unavailable ({exc.__class__.__name__})"
 
 
 def species_path_lines(spec: dict, mode: str) -> list:
@@ -209,6 +240,52 @@ else:
 # ── Run metadata ───────────────────────────────────────────────────────────────
 generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+# ── Provenance ─────────────────────────────────────────────────────────────────
+# Which exact version of the pipeline and its tools produced this report —
+# the config-declared tool *choice* (e.g. "blast") is already shown in Run
+# Metadata; this is the actually-installed version behind that choice,
+# useful for a methods section or reproducing a run later. Repo root is
+# taken from Snakemake's own workflow.basedir (the directory containing
+# the Snakefile) when available, falling back to the current directory —
+# git works from any subdirectory of a checkout regardless.
+_repo_dir = getattr(getattr(snakemake, "workflow", None), "basedir", ".")
+git_commit = get_git_commit(_repo_dir)
+
+python_version = sys.version.split()[0]
+
+# Snakemake's own version is captured once in the Snakefile itself (the
+# master process actually running Snakemake, where it's guaranteed to be
+# installed) and passed in as a param — NOT looked up here via subprocess.
+# Every other tool version below is read from a shared JSON file that each
+# tool's own rule wrote to at the point it actually ran. Neither of these
+# can be discovered by asking this rule's own environment: under
+# --use-conda, this script runs in its own isolated (typically
+# plotting-only) conda env, which was never going to have blastp, mafft,
+# Gblocks, codeml, or even Snakemake itself on PATH — those tools were
+# only ever reachable from inside their own rule's environment, which no
+# longer exists by the time this report is written. See
+# record_tool_version.py for the write side of this.
+snakemake_version = getattr(snakemake.params, "snakemake_version", "unknown")
+
+tool_versions = {}
+_version_file = getattr(snakemake.params, "version_file", None)
+if _version_file and Path(_version_file).exists():
+    try:
+        tool_versions = json.loads(Path(_version_file).read_text())
+    except (json.JSONDecodeError, OSError):
+        tool_versions = {}
+
+
+def _tool_version(key: str) -> str:
+    return tool_versions.get(key, "unavailable (not recorded — rerun this pipeline "
+                                    "with the current Snakefile to populate it)")
+
+
+search_tool_version = _tool_version(search_method)   # key: "blast" or "diamond"
+trimmer_version     = _tool_version(trimmer)          # key: "gblocks" or "trimal"
+mafft_version        = _tool_version("mafft")
+codeml_version       = _tool_version("codeml")
+
 # ── Output file checklist ─────────────────────────────────────────────────────
 # (relative to RESULTS) — mirrors the tree documented in the Snakefile.
 CHECKLIST = [
@@ -295,6 +372,16 @@ lines.append(("body", f"CDS extraction: {cds_tool}    "
                        f"Trimmer: {trimmer}"))
 lines.append(("body", f"BLAST e-value cutoff: {evalue}"))
 lines.append(("body", f"dS saturation threshold: {ds_sat_threshold:g}"))
+lines.append(("gap", ""))
+
+# ── Provenance ──────────────────────────────────────────────────────────────
+lines.append(("header", "Provenance"))
+lines.append(("body", f"Pipeline commit: {git_commit}"))
+lines.append(("body", f"Python: {python_version}    Snakemake: {snakemake_version}"))
+lines.append(("body", f"{search_method}: {search_tool_version}"))
+lines.append(("body", f"{trimmer}: {trimmer_version}"))
+lines.append(("body", f"mafft: {mafft_version}"))
+lines.append(("body", f"codeml: {codeml_version}"))
 lines.append(("gap", ""))
 
 # ── Gene pair counts ────────────────────────────────────────────────────────

@@ -1,0 +1,163 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# dN/dS Pipeline — Batch Mode Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Runs one reference species against multiple target species, producing a
+# fully independent, ordinary single-pair pipeline run for each
+# (reference, target) comparison — see README.md's "Batch mode" section
+# for how this actually works under the hood.
+#
+# This is a SEPARATE config schema from config.yaml, not a mode switch on
+# it — a pairwise run always uses config.yaml (query/target), and a batch
+# run always uses a file like this one (reference/targets), invoked via
+# workflow/scripts/run_batch.py rather than snakemake directly:
+#
+#   python3 workflow/scripts/run_batch.py --configfile config/batch_config.yaml --cores 16
+#
+# INPUT MODE — same three modes as config.yaml, chosen independently for
+# the reference and for EACH target (every species in this file can be a
+# different mode from every other one):
+#
+#   Mode A — genome + GFF:      fasta: ...   gff: ...
+#   Mode B — pre-made FAA+FNA:  faa: ...     fna: ...
+#   Mode C — CDS FNA only:      fna: ...
+#
+# Priority when multiple keys are present for one species: Mode B > Mode C > Mode A.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# --- Reference species (compared against every target below) ----------------
+# By default, every target is compared against this same reference input.
+# If a particular comparison needs a DIFFERENT reference file instead —
+# e.g. each target has its own relevant chromosome/scaffold, and you've
+# pre-restricted the reference to just that region per comparison rather
+# than using the full genome/CDS set every time — give that target its
+# own `reference_override` block instead (see the targets section below;
+# same fasta/gff/faa/fna shape, can be a different mode than the
+# top-level reference or than other targets' overrides). The reference's
+# `prefix` is always used for naming regardless of whether a target
+# overrides the files — it's still logically the same species in every
+# comparison, just a different file for that one comparison.
+reference:
+  # Mode A:
+  # fasta: "path/to/reference.fasta"
+  # gff:   "path/to/reference.gff"
+
+  # Mode B:
+  # faa: "path/to/reference.faa"
+  # fna: "path/to/reference.fna"
+
+  # Mode C:
+  fna: "path/to/reference.fna"
+
+  prefix: "reference"
+
+# --- Target species (one comparison run per entry) ---------------------------
+# Each target needs a `prefix` that is unique across ALL targets AND
+# different from the reference's prefix — run_batch.py validates this
+# up front, before launching anything, since a collision would silently
+# make one comparison's entire output directory overwrite another's.
+#
+# Each target can independently be Mode A, B, or C — exactly like the
+# reference above and like query/target in a normal config.yaml.
+#
+# reference_override (optional, per target): use a different reference
+# file for JUST this one comparison instead of the shared reference:
+# block above — e.g. species1 pairs against one chromosome/scaffold of
+# the reference, while species2 pairs against a different one from the
+# same reference species. Can be any mode (A/B/C), independently of the
+# top-level reference's mode or of other targets' overrides. If omitted,
+# this target is compared against the top-level reference: block as normal.
+targets:
+  - prefix: "species1"
+    # Mode A:
+    # fasta: "path/to/species1.fasta"
+    # gff:   "path/to/species1.gff"
+    # Mode B:
+    # faa: "path/to/species1.faa"
+    # fna: "path/to/species1.fna"
+    # Mode C:
+    fna: "path/to/species1.fna"
+    # reference_override — same three modes as above, independently of
+    # which mode the top-level reference or this target itself is using:
+    # Mode A:
+    # reference_override:
+    #   fasta: "path/to/reference_region1.fasta"
+    #   gff:   "path/to/reference_region1.gff"
+    # Mode B:
+    # reference_override:
+    #   faa: "path/to/reference_region1.faa"
+    #   fna: "path/to/reference_region1.fna"
+    # Mode C:
+    # reference_override:
+    #   fna: "path/to/reference_region1.fna"
+
+  - prefix: "species2"
+    # Mode A:
+    # fasta: "path/to/species2.fasta"
+    # gff:   "path/to/species2.gff"
+    # Mode B:
+    # faa: "path/to/species2.faa"
+    # fna: "path/to/species2.fna"
+    # Mode C:
+    fna: "path/to/species2.fna"
+    # reference_override — same three modes as above:
+    # Mode A:
+    # reference_override:
+    #   fasta: "path/to/reference_region2.fasta"
+    #   gff:   "path/to/reference_region2.gff"
+    # Mode B:
+    # reference_override:
+    #   faa: "path/to/reference_region2.faa"
+    #   fna: "path/to/reference_region2.fna"
+    # Mode C:
+    # reference_override:
+    #   fna: "path/to/reference_region2.fna"
+
+  - prefix: "species3"
+    # Mode A:
+    # fasta: "path/to/species3.fasta"
+    # gff:   "path/to/species3.gff"
+    # Mode B:
+    # faa: "path/to/species3.faa"
+    # fna: "path/to/species3.fna"
+    # Mode C:
+    fna: "path/to/species3.fna"
+    # reference_override — same three modes as above:
+    # Mode A:
+    # reference_override:
+    #   fasta: "path/to/reference_region3.fasta"
+    #   gff:   "path/to/reference_region3.gff"
+    # Mode B:
+    # reference_override:
+    #   faa: "path/to/reference_region3.faa"
+    #   fna: "path/to/reference_region3.fna"
+    # Mode C:
+    # reference_override:
+    #   fna: "path/to/reference_region3.fna"
+
+# --- Output directory (batch root — each comparison gets its own subfolder,
+# named "{reference.prefix}_vs_{target.prefix}", underneath this) -----------
+outdir: "output_batch"
+
+# --- Everything below is shared across every comparison in this batch,
+# exactly like a single config.yaml — copied verbatim into each generated
+# per-pair config. -------------------------------------------------------
+
+# --- BLAST / RBH parameters --------------------------------------------------
+blast:
+  evalue:  1e-5   # e-value cutoff for RBH filtering
+  min_cov: 60     # minimum % coverage of shorter sequence (default 60)
+  threads: 8      # CPU threads for blastp / diamond
+
+# --- MAFFT parameters --------------------------------------------------------
+mafft:
+  threads: 6
+
+# --- dS saturation threshold -------------------------------------------------
+dS_saturation_threshold: 2.0
+
+# --- Tool switches -----------------------------------------------------------
+tools:
+  cds_extraction: "anchorwave"  # anchorwave (default) | gffread
+  search_method:  "blast"       # blast (default)      | diamond
+  trimmer:        "gblocks"     # gblocks (default)    | trimal

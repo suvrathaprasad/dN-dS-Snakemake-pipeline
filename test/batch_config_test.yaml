@@ -1,0 +1,58 @@
+# Batch mode test configuration — Mode B (pre-made FAA + FNA)
+#
+# Reuses the existing bundled test dataset: species1 as the reference,
+# species2 as one real target (same pair test/config_test.yaml already
+# runs, just expressed in batch schema here).
+#
+# species2.faa/.fna were generated as species1 + ~5% random amino acid
+# substitutions, independently back-translated to nucleotide (see
+# test/README.md) — this guarantees reciprocal BLAST hits exist while
+# simulating between-species divergence. The same dS≈0 caveat applies:
+# this is for toolchain verification, not biological interpretation.
+#
+# Only one real target is bundled here. To exercise batch mode with more
+# than one comparison, add more targets below the same way species2 was
+# made (species1 + independent random substitutions, back-translated) —
+# uncomment and fill in the placeholders, or add new entries following
+# the same pattern. run_batch.py's own prefix-uniqueness validation will
+# catch it immediately if a new target's prefix collides with an
+# existing one.
+
+reference:
+  faa:    "test/data/species1.faa"
+  fna:    "test/data/species1.fna"
+  prefix: "species1"
+
+targets:
+  - faa:    "test/data/species2.faa"
+    fna:    "test/data/species2.fna"
+    prefix: "species2"
+
+  # - faa:    "test/data/species3.faa"
+  #   fna:    "test/data/species3.fna"
+  #   prefix: "species3"
+
+  # - faa:    "test/data/species4.faa"
+  #   fna:    "test/data/species4.fna"
+  #   prefix: "species4"
+
+outdir: "test/output_batch"
+
+blast:
+  evalue:  1e-5   # e-value cutoff for RBH
+  min_cov: 60     # minimum % coverage of shorter sequence (30-99)
+  threads: 4
+
+mafft:
+  threads: 4
+
+# dS saturation threshold (standard field value)
+dS_saturation_threshold: 2.0
+
+# Tool switches — defaults shown here. Since this test uses Mode B,
+# cds_extraction is not used. Try switching search_method or trimmer
+# to test the alternative tools end to end, same as config_test.yaml.
+tools:
+  cds_extraction: "anchorwave"  # anchorwave (default) | gffread — unused in Mode B
+  search_method:  "blast"       # blast (default)      | diamond
+  trimmer:        "gblocks"     # gblocks (default)    | trimal

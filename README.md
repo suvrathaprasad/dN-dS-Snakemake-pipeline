@@ -62,7 +62,6 @@ A reproducible Snakemake pipeline for estimating **pairwise synonymous (dS) and 
                                    │
                                    ▼
                output/results/run_summary.pdf
-
 ```
 
 **Why RBH and not OrthoFinder?** For strict pairwise dN/dS between two species, RBH identifies one-to-one orthologs more directly and with less overhead. OrthoFinder is designed for multi-species ortholog inference and produces many-to-many groups that require additional filtering for pairwise analyses.
@@ -128,7 +127,7 @@ Tab-separated, one row per orthologous gene pair:
 
 The last three columns are carried over from the RBH search
 (`intermediate/rbh_pairs.tsv`) rather than computed from the final codon
-alignment. They're a quick way to sanity-check a surprising ω value —
+alignment. They're a quick way to sanity-check a surprising ω value or
 an outlier dN/dS on a pair with low identity or partial coverage is more
 likely to reflect a marginal alignment than genuine selection, and is
 worth a manual look before drawing conclusions from it. These same three
@@ -262,6 +261,254 @@ run because a genome path was misspelled.
 
 ---
 
+## Batch mode
+
+Run one reference species against multiple targets — e.g. a small
+phylogenomic scan of one reference against several populations — without
+hand-editing `config.yaml` and re-running the pipeline once per
+comparison.
+
+The examples below use 3 targets, but this is not a fixed number —
+`targets` in `config/batch_config.yaml` is a plain list, and it supports
+**reference vs. N targets** for any N. Want 5 targets instead of 3? Add
+2 more entries to the list and rerun — nothing else changes, there's no
+hardcoded target count anywhere in `run_batch.py` or the Snakefile. See
+[Adding more targets](#adding-more-targets) below.
+
+### How it works
+
+Batch mode is a thin wrapper (`workflow/scripts/run_batch.py`), **not**
+a Snakemake rule and not a second Snakefile. For each target, it
+generates an ordinary single-pair `config.yaml` (the reference becomes
+`query`, that target becomes `target`) and invokes the real, completely
+unmodified `Snakefile` once, sequentially — exactly as if you'd run that
+pairwise comparison by hand. Every existing rule, and the Mode A/B/C
+priority logic described above, works entirely unchanged, because from
+the Snakefile's point of view each invocation is just a normal
+single-pair run. Comparisons run **sequentially, one at a time** — wall
+clock time scales roughly linearly with the number of targets.
+
+This is a separate config file and a separate command from pairwise
+mode, not a switch inside `config.yaml` — a pairwise run always uses
+`config.yaml` (`query`/`target`) with plain `snakemake`, and a batch run
+always uses a file like `batch_config.yaml` (`reference`/`targets`) with
+`run_batch.py`. Nothing about running the pipeline pairwise changes.
+
+### Config
+
+`config/batch_config.yaml` reuses the exact same per-species keys as
+`config.yaml` (`fasta`/`gff`/`faa`/`fna`/`prefix`, same Mode A/B/C
+priority) — just one `reference` block instead of `query`, and a
+`targets` list instead of a single `target`. The reference and each
+target can independently be in a different mode:
+
+```yaml
+reference:
+  prefix: "ref"
+  faa: "path/to/ref.faa"
+  fna: "path/to/ref.fna"
+
+targets:
+  - prefix: "species1"
+    faa: "path/to/sp1.faa"
+    fna: "path/to/sp1.fna"
+  - prefix: "species2"
+    faa: "path/to/sp2.faa"
+    fna: "path/to/sp2.fna"
+  - prefix: "species3"
+    faa: "path/to/sp3.faa"
+    fna: "path/to/sp3.fna"
+
+outdir: "output_batch"
+
+# Shared across every comparison in the batch — same keys as config.yaml
+blast: {evalue: 1e-5, min_cov: 60, threads: 8}
+mafft: {threads: 6}
+dS_saturation_threshold: 2.0
+tools: {search_method: "blast", trimmer: "gblocks"}
+```
+
+See `config/batch_config.yaml` for the full template
+with comments.
+
+### Using a different reference file per comparison
+
+By default, every target is compared against the same `reference:`
+block. Some setups need each comparison to use a *different* reference
+input instead — for example, each target corresponds to a different
+chromosome/scaffold of interest, and the reference has been
+pre-restricted to just that region for each comparison rather than
+using the full genome or CDS set every time.
+
+Give a target its own `reference_override` block to use a different
+reference file for just that one comparison. `reference_override` can
+be any mode (A/B/C), independently of the top-level reference's mode or
+of other targets' overrides:
+
+```yaml
+reference:
+  prefix: "reference"
+  fna: "path/to/reference.fna"
+
+targets:
+  - prefix: "species1"
+    fna: "path/to/species1.fna"
+    reference_override:          # Mode B here, even though the
+      faa: "path/to/reference_region1.faa"   # top-level reference above
+      fna: "path/to/reference_region1.fna"   # is Mode C
+  - prefix: "species2"
+    fna: "path/to/species2.fna"
+    reference_override:          # Mode A here — every override is
+      fasta: "path/to/reference_region2.fasta"  # independent of every
+      gff:   "path/to/reference_region2.gff"    # other one
+```
+
+If **every** target overrides the reference, the top-level `reference:`
+block's files are never actually used by anything and aren't required —
+only its `prefix` is, since that's still used for naming every
+comparison's output directory:
+
+```yaml
+reference:
+  prefix: "reference"   # no fasta/gff/faa/fna needed at all in this case
+
+targets:
+  - prefix: "species1"
+    fna: "path/to/species1.fna"
+    reference_override:
+      fna: "path/to/reference_region1.fna"
+  - prefix: "species2"
+    fna: "path/to/species2.fna"
+    reference_override:
+      fna: "path/to/reference_region2.fna"
+```
+
+A few other things worth knowing about how this works:
+- The reference's `prefix` is always used for that comparison's output
+  directory name and `query.prefix`, regardless of whether its files are
+  overridden — it's still logically the same reference species in every
+  comparison, just a different file for that particular one.
+- A target without `reference_override` is compared against the
+  top-level `reference:` block as normal — overriding is entirely
+  optional, per target.
+- This is validated the same way as any other species block — a missing
+  or non-existent override file is caught up front, before any
+  comparison starts, same as everywhere else in batch mode.
+
+### Running it
+
+```bash
+python3 workflow/scripts/run_batch.py \
+    --configfile config/batch_config.yaml \
+    --cores 16
+```
+
+Every target's config is validated **before any comparison starts** —
+missing/typo'd file paths, out-of-range numeric values (same checks as
+the Snakefile's own config validation), and, importantly, **prefix
+collisions**: every target's prefix must be unique and different from
+the reference's, since it's used directly in that comparison's output
+directory name. A collision would otherwise silently make one
+comparison's entire output overwrite another's, so this is checked
+across the whole target list up front rather than discovered partway
+through a multi-hour run.
+
+Useful flags:
+```bash
+--no-use-conda              # don't pass --use-conda to snakemake
+-n / --dry-run               # pass -n through to snakemake for every pair
+--snakemake-args "..."       # extra args appended to every snakemake call,
+                              # e.g. --snakemake-args="--rerun-incomplete"
+```
+
+### Output structure
+
+Each comparison gets its own **complete, ordinary single-pair output
+tree** — the same structure documented above, once per target:
+
+```
+output_batch/
+├── ref_vs_species1/
+│   ├── intermediate/    (same structure as a normal run)
+│   ├── logs/
+│   └── results/
+│       ├── dnds_output.tsv
+│       ├── plots/
+│       ├── tables/
+│       └── run_summary.pdf
+├── ref_vs_species2/
+│   └── (identical structure)
+├── ref_vs_species3/
+│   └── (identical structure)
+├── _generated_configs/
+│   ├── ref_vs_species1.yaml   (kept, not deleted — see below)
+│   ├── ref_vs_species2.yaml
+│   └── ref_vs_species3.yaml
+└── batch_run.log
+```
+
+Two-level naming, each level doing one job: the **directory name**
+(`ref_vs_species1`) disambiguates *which comparison*, and the **gene ID
+prefix** inside each file (`ref_geneX` vs `sp1_geneY`) disambiguates
+*which species within that comparison* — nothing new to learn if you
+already know how to read a single-pair output.
+
+`_generated_configs/` holds the exact per-pair `config.yaml` `run_batch.py`
+generated and passed to Snakemake for each comparison — kept rather than
+deleted, both so you can see exactly what ran, and so you can rerun any
+single comparison on its own (see Troubleshooting below).
+
+`batch_run.log` records start/end time and pass/fail status for each
+comparison, plus the final summary — each comparison's own detailed
+rule-by-rule logs still land under its own `logs/` directory exactly as
+in a normal run; this is only the batch-level orchestration log.
+
+### Adding more targets
+
+`targets` is a plain list — add as many entries as you have data for and
+rerun. Nothing else needs to change; there's no hardcoded target count
+anywhere in `run_batch.py` or the Snakefile; `run_batch.py` simply loops
+over however many entries are in the list. For example, going from 3
+targets to 5 is just:
+
+```yaml
+targets:
+  - prefix: "species1"
+    faa: "path/to/sp1.faa"
+    fna: "path/to/sp1.fna"
+  - prefix: "species2"
+    faa: "path/to/sp2.faa"
+    fna: "path/to/sp2.fna"
+  - prefix: "species3"
+    faa: "path/to/sp3.faa"
+    fna: "path/to/sp3.fna"
+  - prefix: "species4"          # new
+    faa: "path/to/sp4.faa"      # new
+    fna: "path/to/sp4.fna"      # new
+  - prefix: "species5"          # new
+    faa: "path/to/sp5.faa"      # new
+    fna: "path/to/sp5.fna"      # new
+```
+
+Rerunning with this config produces 5 output directories instead of 3 —
+`ref_vs_species4` and `ref_vs_species5` run alongside the original 3,
+with the same up-front validation (including the prefix-uniqueness
+check) now covering all 5. Since execution is sequential, wall clock
+time scales roughly linearly with the number of targets — fine at the
+scale of a handful of targets, worth knowing if this ever grows to
+dozens, at which point true parallel execution across targets would
+start being worth the added complexity.
+
+### If one comparison fails
+
+A failure in one comparison does **not** stop the rest of the batch —
+`run_batch.py` logs it, moves on to the next target, and reports a
+summary of which comparisons succeeded and which didn't at the end. See
+[Troubleshooting](#troubleshooting) for how to debug a single failed
+comparison in isolation.
+
+---
+
 ## Test dataset
 
 A minimal test dataset (20 gene pairs, Mode B) is provided in `test/`.
@@ -280,7 +527,7 @@ Expected output: `test/output/results/dnds_output.tsv`
 ### Continuous integration
 
 `.github/workflows/test.yml` runs this same test dataset end to end on
-every push and pull request against `main` — it's a smoke test (catches
+every push and pull request against `main`. It's a smoke test (catches
 broken rule wiring, a script that now raises on real data, a missing
 output) rather than a correctness test, for the same reason the test
 data itself isn't biologically meaningful. `run_summary.pdf` and
@@ -409,7 +656,7 @@ A two-panel PDF (`pseudogene_evidence.pdf`) summarises the counts:
 **Why not a full pseudogene detection pipeline?**
 
 Dedicated pseudogene tools such as PseudoPipe and PGAP operate on a
-single genome assembly and GFF — they scan for disrupted open reading
+single genome assembly and GFF which scan for disrupted open reading
 frames, truncated proteins, and homology to known functional genes
 across the whole genome. This pipeline is fundamentally different: it
 is a *comparative* analysis working on *pairs* of orthologous genes
@@ -461,15 +708,10 @@ entire run. It includes:
 - Provenance: the pipeline's git commit hash (flagged if the working tree
   has uncommitted changes), and the actually-installed version of each
   selected tool (search method, trimmer, MAFFT, codeml) — not just which
-  one `config.yaml` says to use. Each tool's version is recorded by its
-  own rule at the moment it actually runs (see
-  `intermediate/tool_versions.json`), since under `--use-conda` every
-  rule has its own isolated environment and `write_summary.py` itself has
-  no way to see whether blastp/mafft/etc. are even installed by the time
-  it runs. Falls back to a clear "not recorded"/"unavailable" note per
-  tool if that file is missing or incomplete (e.g. a partial rerun),
-  rather than failing. Useful for a methods section or reproducing a run
-  later.
+  one `config.yaml` says to use. Falls back to a clear "not found"/
+  "unavailable" note per tool rather than failing if a tool isn't on
+  `PATH` or this isn't a git checkout. Useful for a methods section or
+  reproducing a run later.
 - Gene pair counts at each filter stage
 - dN, dS, and dN/dS summary statistics (median, mean, min, max)
 - Functional classification breakdown with percentages
@@ -587,6 +829,25 @@ reading frames — the ω ≥ 1 signal may reflect positive selection
 rather than degeneration, or the sequences may have been repaired
 during annotation. Check the raw alignments and consider running
 a dedicated pseudogene tool for confirmation.
+
+**One comparison in a batch run fails**  
+Batch mode isolates failures by design, if one target's comparison
+fails, the rest of the batch keeps running, and `run_batch.py` prints a
+summary of which comparisons succeeded and which didn't. To debug the
+failed one, `cd` into its own output directory and rerun the exact
+single-pair `snakemake` command by hand (also printed by `run_batch.py`
+right after the failure):
+
+```bash
+snakemake --snakefile workflow/Snakefile \
+          --configfile output_batch/_generated_configs/{reference}_vs_{target}.yaml \
+          --use-conda \
+          --cores N
+```
+
+This is an ordinary single-pair run, unrelated to and unaffected by the
+other comparisons in the batch and nothing about debugging it differs from
+debugging any other pairwise run using the sections above.
 
 **Re-running from an intermediate step**  
 All intermediate files are kept under `output/intermediate/`. Snakemake's

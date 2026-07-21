@@ -98,6 +98,7 @@ output/
 │   │   ├── genes_degenerate.tsv              ω ≥ 1
 │   │   ├── genes_degenerate_annotated.tsv    ω ≥ 1 + sequence evidence
 │   │   ├── genes_ds_saturated.tsv            dS > saturation threshold
+│   │   ├── genes_dnds_skipped.tsv            Gene pairs that never reached dnds_output.tsv
 │   │   ├── genes_undefined_ds.tsv            dS = 0 (excluded from plots)
 │   │   ├── genes_high_dn.tsv                 dN above median
 │   │   ├── genes_high_ds.tsv                 dS above median
@@ -206,15 +207,15 @@ Three tool choices are available in `config/config.yaml`. All default to the ori
 ```yaml
 tools:
   cds_extraction: "anchorwave"  # anchorwave (default) | gffread
-  search_method:  "blast"       # blast (default)      | diamond
-  trimmer:        "gblocks"     # gblocks (default)    | trimal
+  search_method:  "diamond"     # diamond (default)    | blast
+  trimmer:        "trimal"      # trimal (default)     | gblocks
 ```
 
 | Switch | Default | Alternative | When to switch |
 |--------|---------|-------------|----------------|
 | `cds_extraction` | Anchorwave | gffread | Faster CDS extraction when whole-genome alignment is not needed |
-| `search_method` | BLAST+ | DIAMOND | Large proteomes (tens of thousands of proteins) where speed matters |
-| `trimmer` | Gblocks | trimAl | Less aggressive trimming; preferable for divergent sequences |
+| `search_method` | DIAMOND | BLAST+ | When maximum sensitivity matters more than speed, e.g. short or highly divergent sequences |
+| `trimmer` | trimAl | Gblocks | When stricter, more conservative trimming is preferred over trimAl's less aggressive default |
 
 ### 3. Run
 
@@ -269,7 +270,7 @@ hand-editing `config.yaml` and re-running the pipeline once per
 comparison.
 
 The examples below use 3 targets, but this is not a fixed number —
-`targets` in `config/batch_config.yaml` is a plain list, and it supports
+`targets` in `batch_config.yaml` is a plain list, and it supports
 **reference vs. N targets** for any N. Want 5 targets instead of 3? Add
 2 more entries to the list and rerun — nothing else changes, there's no
 hardcoded target count anywhere in `run_batch.py` or the Snakefile. See
@@ -296,7 +297,7 @@ always uses a file like `batch_config.yaml` (`reference`/`targets`) with
 
 ### Config
 
-`config/batch_config.yaml` reuses the exact same per-species keys as
+`batch_config.yaml` reuses the exact same per-species keys as
 `config.yaml` (`fasta`/`gff`/`faa`/`fna`/`prefix`, same Mode A/B/C
 priority) — just one `reference` block instead of `query`, and a
 `targets` list instead of a single `target`. The reference and each
@@ -328,7 +329,7 @@ dS_saturation_threshold: 2.0
 tools: {search_method: "blast", trimmer: "gblocks"}
 ```
 
-See `config/batch_config.yaml` for the full template
+See `batch_config.yaml` in the repository root for the full template
 with comments.
 
 ### Using a different reference file per comparison
@@ -399,7 +400,7 @@ A few other things worth knowing about how this works:
 
 ```bash
 python3 workflow/scripts/run_batch.py \
-    --configfile config/batch_config.yaml \
+    --configfile batch_config.yaml \
     --cores 16
 ```
 
@@ -733,13 +734,13 @@ The PAML codeml control file is at `config/codeml.ctl`. Default settings:
 |------------|-------|--------------------------------------|
 | runmode    | -2    | Pairwise comparison                  |
 | seqtype    | 1     | Codons                               |
-| CodonFreq  | 0     | Equal codon frequencies              |
+| CodonFreq  | 2     | Estimated from observed nucleotide frequencies per codon position |
 | model      | 0     | One ω for all branches               |
 | NSsites    | 0     | No site-specific variation           |
-| fix_kappa  | 1     | κ (ts/tv) fixed at 1                 |
+| fix_kappa  | 0     | κ (ts/tv) estimated freely           |
 | fix_omega  | 0     | ω estimated freely                   |
 
-Modify `config/codeml.ctl` to use different codon frequency models (F1X4: `CodonFreq = 1`, F3X4: `2`, F61: `3`) or to free κ (`fix_kappa = 0`).
+Modify `config/codeml.ctl` to use different codon frequency models (1/61: `CodonFreq = 0`, F1X4: `1`, F61: `3`).
 
 ---
 
@@ -759,12 +760,12 @@ Modify `config/codeml.ctl` to use different codon frequency models (F1X4: `Codon
 | Anchorwave | 1.2.3          | CDS extraction (default)        | Song & Zhu (2022) *PNAS* doi:10.1073/pnas.2113075119                      |
 | gffread    | 0.12.7         | CDS extraction (alternative)    | Pertea & Pertea (2020) *F1000Research* doi:10.12688/f1000research.23297.2  |
 | EMBOSS     | 6.6.0          | CDS translation                 | Rice *et al.* (2000) *Trends Genet* doi:10.1016/S0168-9525(00)02024-2     |
-| BLAST+     | 2.15.0         | RBH search (default)            | Camacho *et al.* (2009) *BMC Bioinformatics* doi:10.1186/1471-2105-10-421 |
-| DIAMOND    | 2.1.0          | RBH search (alternative)        | Buchfink *et al.* (2021) *Nature Methods* doi:10.1038/s41592-021-01101-x  |
+| BLAST+     | 2.15.0         | RBH search (alternative)        | Camacho *et al.* (2009) *BMC Bioinformatics* doi:10.1186/1471-2105-10-421 |
+| DIAMOND    | 2.1.0          | RBH search (default)            | Buchfink *et al.* (2021) *Nature Methods* doi:10.1038/s41592-021-01101-x  |
 | MAFFT      | 7.520          | Protein alignment               | Katoh & Standley (2013) *MBE* doi:10.1093/molbev/mst010                   |
 | pal2nal    | 14             | Codon alignment                 | Suyama *et al.* (2006) *NAR* doi:10.1093/nar/gkl315                       |
-| Gblocks    | 0.91b          | Alignment trimming (default)    | Castresana (2000) *MBE* doi:10.1093/oxfordjournals.molbev.a026334          |
-| trimAl     | 1.4.1          | Alignment trimming (alternative)| Capella-Gutiérrez *et al.* (2009) *Bioinformatics* doi:10.1093/bioinformatics/btp348 |
+| Gblocks    | 0.91b          | Alignment trimming (alternative)| Castresana (2000) *MBE* doi:10.1093/oxfordjournals.molbev.a026334          |
+| trimAl     | 1.4.1          | Alignment trimming (default)    | Capella-Gutiérrez *et al.* (2009) *Bioinformatics* doi:10.1093/bioinformatics/btp348 |
 | PAML       | 4.9j           | dN/dS estimation                | Yang (2007) *MBE* doi:10.1093/molbev/msm088                               |
 | Snakemake  | ≥7.0           | Workflow management             | Mölder *et al.* (2021) *F1000Research* doi:10.12688/f1000research.29032.2  |
 | matplotlib | ≥3.7           | Result visualisation            | Hunter (2007) *CSE* doi:10.1109/MCSE.2007.55                               |
@@ -806,11 +807,6 @@ reinstallation.
 Try relaxing `blast.evalue` or `blast.min_cov` in `config/config.yaml`.
 Check `output/logs/get_rbh.log` for details on how many hits were found
 in each direction.
-
-**Many genes lost at the trimming step**  
-Switch to `trimmer: trimal` in `config/config.yaml` for less aggressive
-trimming. Genes trimmed to zero length are skipped gracefully in both
-cases rather than failing the pipeline.
 
 **codeml output is empty**  
 Check that `output/intermediate/aligns/{gene}.pal2nal-gb1.fa` is

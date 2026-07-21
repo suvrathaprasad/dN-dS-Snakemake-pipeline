@@ -301,6 +301,7 @@ CHECKLIST = [
     ("tables/genes_degenerate.tsv",           "ω ≥ 1"),
     ("tables/genes_degenerate_annotated.tsv", "ω ≥ 1 + sequence evidence"),
     ("tables/genes_ds_saturated.tsv",         f"dS > {ds_sat_threshold:g}"),
+    ("tables/genes_dnds_skipped.tsv",         "Never reached dnds_output.tsv"),
     ("tables/genes_undefined_ds.tsv",         "dS = 0"),
     ("tables/genes_high_dn.tsv",              "dN above median"),
     ("tables/genes_high_ds.tsv",              "dS above median"),

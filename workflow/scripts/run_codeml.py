@@ -33,6 +33,16 @@ out_txt     = Path(snakemake.output.txt).resolve()
 log_path    = Path(snakemake.log[0]).resolve()
 workdir     = Path(snakemake.params.workdir).resolve()
 
+# Display name for whichever trimmer actually produced (or emptied) this
+# alignment — matches run_trimmer.py's own "Gblocks"/"trimAl" capitalisation
+# exactly, so a message here and one from run_trimmer.py about the same
+# gene read identically. Falls back gracefully if the param is ever
+# missing (e.g. an older Snakefile, or a standalone/test invocation)
+# rather than guessing at a specific tool.
+_TRIMMER_DISPLAY_NAMES = {"gblocks": "Gblocks", "trimal": "trimAl"}
+_trimmer_raw = snakemake.params.get("trimmer", None)
+trimmer_display = _TRIMMER_DISPLAY_NAMES.get(_trimmer_raw, _trimmer_raw or "the configured trimmer")
+
 # ── Ensure log directory exists ───────────────────────────────────────────────
 log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -78,11 +88,11 @@ def record_paml_version(codeml_output_path: Path) -> None:
     except Exception as exc:
         log(f"(non-fatal) could not record codeml version: {exc}")
 
-# ── Skip empty alignments (Gblocks trimmed everything) ───────────────────────
+# ── Skip empty alignments (trimmer removed everything) ───────────────────────
 if aln_path.stat().st_size == 0:
-    log("Skipped: Gblocks produced empty alignment")
+    log(f"Skipped: {trimmer_display} produced empty alignment")
     out_txt.parent.mkdir(parents=True, exist_ok=True)
-    out_txt.write_text("Skipped: Gblocks produced empty alignment\n")
+    out_txt.write_text(f"Skipped: {trimmer_display} produced empty alignment\n")
     sys.exit(0)
 
 # ── Clean workdir to remove stale codeml auxiliary files from prior runs ──────

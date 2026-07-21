@@ -73,8 +73,8 @@ small dataset before committing to a choice for your real data:
 
 ```yaml
 tools:
-  search_method: "diamond"   # try DIAMOND instead of BLAST+
-  trimmer:       "trimal"    # try trimAl instead of Gblocks
+  search_method: "diamond"   # try BLAST+ instead of DIAMOND
+  trimmer:       "trimal"    # try Gblocks instead of trimAl
 ```
 
 Edit `config_test.yaml` directly, or pass an override on the command line:

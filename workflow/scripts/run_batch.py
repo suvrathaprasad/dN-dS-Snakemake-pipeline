@@ -4,14 +4,15 @@ run_batch.py — Run the dN/dS pipeline for one reference species against
 multiple target species.
 
 This is a thin wrapper, not a Snakemake rule or a second Snakefile: for
-each target, it generates an ordinary single-pair config.yaml (reference
-as "query", that target as "target") and invokes the real, unmodified
-Snakefile once, sequentially, exactly as if you'd run that pairwise
-comparison by hand. The Snakefile itself has no batch-mode awareness at
-all — every existing rule, and the mode-resolution logic (Mode B > C > A,
-independently per species) that already lives there, works completely
-unchanged, because from the Snakefile's point of view each invocation is
-just a normal single-pair run.
+each target, it generates an ordinary single-pair config.yaml (that
+target as "query", the reference as "target" — matching the convention
+of running each comparison as target vs. reference) and invokes the
+real, unmodified Snakefile once, sequentially, exactly as if you'd run
+that pairwise comparison by hand. The Snakefile itself has no batch-mode
+awareness at all — every existing rule, and the mode-resolution logic
+(Mode B > C > A, independently per species) that already lives there,
+works completely unchanged, because from the Snakefile's point of view
+each invocation is just a normal single-pair run.
 
 Why a subprocess-per-pair wrapper rather than a native Snakemake batch
 rule: the comparisons are genuinely independent (nothing to share in one
@@ -25,12 +26,13 @@ executable, the same way a person would.
 
 Usage:
   python3 workflow/scripts/run_batch.py \
-      --configfile batch_config.yaml \
+      --configfile config/batch_config.yaml \
       --cores 16
 
 Run from the repository root (same requirement as running the Snakefile
-directly) — paths in batch_config.yaml, and the "workflow/Snakefile"
-path this script invokes, are both relative to the current directory.
+directly) — paths in config/batch_config.yaml, and the
+"workflow/Snakefile" path this script invokes, are both relative to the
+current directory.
 """
 
 # =============================================================================
@@ -241,24 +243,35 @@ def build_pair_config(batch_cfg: dict, reference: dict, target: dict, pair_outdi
     mafft/tools/dS_saturation_threshold is copied straight from the
     batch config — shared across every comparison in the batch.
 
+    The target species is used as "query" and the reference is used as
+    "target" in the generated config — matching the convention of
+    running each comparison as target vs. reference (not reference vs.
+    target). This is purely a bookkeeping/labeling choice: PAML's
+    pairwise codeml computes one symmetric dN/dS per pair regardless of
+    which sequence is called "query" vs "target", so the actual dN, dS,
+    and dN/dS values are unaffected either way. What this choice does
+    determine is which species' ID lands in Gene_query vs Gene_target
+    in the output tables, and which prefix is reported as "query" vs
+    "target" in run_summary.pdf.
+
     If this target has a reference_override block, its files are used
-    for query instead of the top-level reference's — e.g. when each
-    comparison needs a different, pre-restricted extract of the
-    reference (a single scaffold/chromosome relevant to that particular
-    target), rather than the same reference file for every comparison.
-    The reference's prefix is always used regardless, since it's still
-    logically the same species in every comparison — only which file(s)
-    represent it for this one comparison changes.
+    for the reference side instead of the top-level reference's — e.g.
+    when each comparison needs a different, pre-restricted extract of
+    the reference (a single scaffold/chromosome relevant to that
+    particular target), rather than the same reference file for every
+    comparison. The reference's prefix is always used regardless, since
+    it's still logically the same species in every comparison — only
+    which file(s) represent it for this one comparison changes.
     """
     override = target.get("reference_override")
-    query_spec = dict(override) if override else dict(reference)
-    query_spec["prefix"] = reference["prefix"]
+    reference_spec = dict(override) if override else dict(reference)
+    reference_spec["prefix"] = reference["prefix"]
 
-    target_spec = {k: v for k, v in target.items() if k != "reference_override"}
+    query_spec = {k: v for k, v in target.items() if k != "reference_override"}
 
     return {
         "query":  query_spec,
-        "target": target_spec,
+        "target": reference_spec,
         "outdir": pair_outdir,
         "blast":  batch_cfg.get("blast", {}),
         "mafft":  batch_cfg.get("mafft", {}),
@@ -275,7 +288,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run the dN/dS pipeline for one reference against multiple targets."
     )
-    parser.add_argument("--configfile", required=True, help="Path to batch_config.yaml")
+    parser.add_argument("--configfile", required=True,
+                         help="Path to the batch config file, e.g. config/batch_config.yaml")
     parser.add_argument("--cores", required=True, type=int, help="Cores passed to each snakemake run")
     parser.add_argument("--no-use-conda", action="store_true",
                          help="Don't pass --use-conda to snakemake (default: pass it)")

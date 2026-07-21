@@ -51,6 +51,12 @@ Output structure:
     plots/functional_summary.pdf          Gene category bar chart
     plots/pseudogene_evidence.pdf         Pseudogene evidence chart
     tables/genes_ds_saturated.tsv        Genes with dS > saturation threshold
+    tables/genes_dnds_skipped.tsv        Gene pairs never reaching dnds_output.tsv
+                                          (sentinel/unparsed/bad_labels — see
+                                          collate_results.py) — includes both
+                                          expected trimming attrition and
+                                          genuine parse failures, with a
+                                          reason column distinguishing them
     run_summary.pdf                      Full run summary report
     tables/genes_conserved.tsv            ω < 0.5
     tables/genes_relaxed.tsv              0.5 ≤ ω < 1
@@ -539,6 +545,7 @@ rule codeml:
         f"{OUTDIR}/logs/codeml/{{gene}}.log"
     params:
         workdir       = f"{INTER}/codeml/{{gene}}",
+        trimmer       = TRIMMER,
         version_file  = VERSIONS_FILE,
         record_script = RECORD_SCRIPT
     conda:
@@ -559,7 +566,8 @@ rule collate_results:
         rbh_tsv        = f"{INTER}/rbh_pairs.tsv"
     output:
         f"{RESULTS}/dnds_output.tsv",
-        f"{RESULTS}/tables/genes_ds_saturated.tsv"
+        f"{RESULTS}/tables/genes_ds_saturated.tsv",
+        f"{RESULTS}/tables/genes_dnds_skipped.tsv"
     script:
         "scripts/collate_results.py"
 

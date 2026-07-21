@@ -54,5 +54,5 @@ dS_saturation_threshold: 2.0
 # to test the alternative tools end to end, same as config_test.yaml.
 tools:
   cds_extraction: "anchorwave"  # anchorwave (default) | gffread — unused in Mode B
-  search_method:  "blast"       # blast (default)      | diamond
-  trimmer:        "gblocks"     # gblocks (default)    | trimal
+  search_method:  "diamond"     # diamond (default)    | blast
+  trimmer:        "trimal"      # trimal (default)     | gblocks

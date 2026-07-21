@@ -82,5 +82,5 @@ dS_saturation_threshold: 2.0
 # Change only the tools you want to switch; others will use the default.
 tools:
   cds_extraction: "anchorwave"  # anchorwave (default) | gffread
-  search_method:  "blast"       # blast (default)      | diamond
-  trimmer:        "gblocks"     # gblocks (default)    | trimal
+  search_method:  "diamond"     # diamond (default)    | blast
+  trimmer:        "trimal"      # trimal (default)     | gblocks

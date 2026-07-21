@@ -27,7 +27,9 @@ which are counted and reported separately rather than lumped into one
 Only "sentinel" is an expected, silent outcome. "unparsed" and
 "bad_labels" are logged with the offending file/line so a real problem
 (bad install, PAML version drift, etc.) doesn't get mistaken for normal
-trimming attrition.
+trimming attrition. All three categories are also written out to
+genes_dnds_skipped.tsv (see below), rather than only being visible as a
+bare count in the log.
 
 dnds_output.tsv also carries three alignment-quality columns (pident,
 query_coverage, target_coverage) joined in from rbh_pairs.tsv by gene ID.
@@ -36,6 +38,16 @@ get_rbh.py but previously discarded afterwards — keeping them lets a
 reviewer sanity-check whether an outlier ω is riding on a well-covered,
 high-identity alignment or a marginal one, without having to separately
 dig through the RBH intermediate file by hand.
+
+genes_dnds_skipped.tsv lists every gene pair that never made it into
+dnds_output.tsv, across all three skip categories above, with its real
+(Gene_query, Gene_target) IDs. A skipped codeml output file has no gene
+names in it (there was no alignment left to name, for a sentinel skip),
+so those IDs are recovered by cross-referencing the file's position in
+the gene list back to the matching row of rbh_pairs.tsv — the same
+1-based numbering the Snakefile itself uses when creating each gene's
+{gene}/{gene}_codeml.txt directory (see get_genes() and
+extract_gene_index() below).
 """
 
 # =============================================================================
@@ -55,6 +67,7 @@ input_files  = list(snakemake.input.codeml_outputs)
 rbh_tsv      = snakemake.input.rbh_tsv
 output_file  = Path(snakemake.output[0])
 sat_tsv      = Path(snakemake.output[1])
+skip_tsv     = Path(snakemake.output[2])
 trimmer      = snakemake.config.get("tools", {}).get("trimmer", "gblocks")
 ds_sat_threshold = float(
     snakemake.config.get("dS_saturation_threshold", 2.0)
@@ -63,36 +76,98 @@ ds_sat_threshold = float(
 output_file.parent.mkdir(parents=True, exist_ok=True)
 
 
-def load_rbh_lookup(path: str) -> dict:
+def load_rbh_table(path: str):
     """
-    Read rbh_pairs.tsv into {(query, target): (pident, query_coverage,
-    target_coverage)}. Tolerant of the file having only the original 5
-    columns (older runs / manual edits) — coverage fields are simply
-    unavailable ("NA") in that case rather than raising.
+    Read rbh_pairs.tsv once, returning two lookups built from the same
+    pass over the file:
+
+      by_pair:  {(query, target): (pident, query_coverage, target_coverage)}
+                — used to join alignment-quality columns onto genes that
+                DID make it into dnds_output.tsv.
+
+      by_index: {1-based row number: (query, target)}
+                — used to recover the real gene IDs for genes that were
+                SKIPPED before ever reaching a parseable codeml output,
+                by matching a skipped file's position in the gene list
+                back to this same row number.
+
+    The numbering in by_index deliberately mirrors the Snakefile's own
+    get_genes() exactly — every non-header line counts, including any
+    blank line, since get_genes() doesn't special-case blank lines
+    either. Building both lookups from a single read (rather than two
+    separate passes, or worse, two different line-selection rules that
+    could quietly drift apart) is what keeps this numbering guaranteed
+    consistent with the Snakefile's.
     """
-    lookup = {}
     with open(path) as fh:
-        header = fh.readline().rstrip("\n").split("\t")
-        col_idx = {name: i for i, name in enumerate(header)}
-        has_cov = "query_coverage" in col_idx and "target_coverage" in col_idx
-        for line in fh:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            parts = line.split("\t")
+        all_lines = fh.readlines()
+
+    header = None
+    data_lines = []
+    for line in all_lines:
+        if line.startswith("Query"):
+            header = line.rstrip("\n").split("\t")
+            continue
+        data_lines.append(line)
+
+    col_idx = {name: i for i, name in enumerate(header)} if header else {}
+    has_cov = "query_coverage" in col_idx and "target_coverage" in col_idx
+
+    by_pair = {}
+    by_index = {}
+    for i, line in enumerate(data_lines):
+        gene_index = i + 1  # matches get_genes()'s f"gene{i+1}" numbering exactly
+        parts = line.rstrip("\n").split("\t") if line.strip() else []
+        query = target = None
+        if header:
             try:
                 query = parts[col_idx["Query"]]
                 target = parts[col_idx["Target"]]
+            except (IndexError, KeyError):
+                pass
+        by_index[gene_index] = (query, target)
+        if query is not None and target is not None:
+            try:
                 pident = parts[col_idx["pident"]]
                 qcov = parts[col_idx["query_coverage"]] if has_cov else "NA"
                 tcov = parts[col_idx["target_coverage"]] if has_cov else "NA"
             except (IndexError, KeyError):
-                continue
-            lookup[(query, target)] = (pident, qcov, tcov)
-    return lookup
+                pident = qcov = tcov = "NA"
+            by_pair[(query, target)] = (pident, qcov, tcov)
+
+    return by_pair, by_index
 
 
-rbh_lookup = load_rbh_lookup(rbh_tsv)
+def extract_gene_index(path: str):
+    """
+    Recover the 1-based gene index from a codeml output file's path
+    (".../codeml/gene42/gene42_codeml.txt" -> 42) — the parent directory
+    name is exactly the Snakefile's {gene} wildcard value. Returns None
+    if the path doesn't match the expected "geneN" pattern, rather than
+    raising, so a genuinely unexpected path just becomes an "unknown"
+    gene in the output table instead of crashing the whole collation.
+    """
+    match = re.match(r"^gene(\d+)$", Path(path).parent.name)
+    return int(match.group(1)) if match else None
+
+
+def split_skip_reason(reason: str):
+    """
+    Split parse_codeml()'s reason string into (category, detail) for a
+    cleaner TSV — e.g. "unparsed (no 'pairwise comparison' section
+    found)" -> ("unparsed", "no 'pairwise comparison' section found").
+    "sentinel" has no detail.
+    """
+    if reason == "sentinel":
+        return "sentinel", ""
+    category, _, rest = reason.partition(" ")
+    detail = rest.strip()
+    if detail.startswith("(") and detail.endswith(")"):
+        detail = detail[1:-1]
+    return category, detail
+
+
+rbh_lookup, rbh_by_index = load_rbh_table(rbh_tsv)
 
 # Expected labels immediately preceding the values we pull out of codeml's
 # "t= ... dN/dS= ... dN = ... dS = ..." line, once all "=" signs are
@@ -194,20 +269,41 @@ def parse_codeml(path: str):
 
 # ── Collate ───────────────────────────────────────────────────────────────────
 rows = []
+skipped_rows = []  # (gene_index, Gene_query, Gene_target, category, detail, file)
 n_sentinel = 0
 n_unparsed = 0
 n_no_rbh_match = 0
+n_skip_no_gene_index = 0
+n_skip_no_rbh_row = 0
 unparsed_details = []
 
 for f in input_files:
     parsed, reason = parse_codeml(f)
     if parsed:
         rows.extend(parsed)
-    elif reason == "sentinel":
+        continue
+
+    if reason == "sentinel":
         n_sentinel += 1
     else:
         n_unparsed += 1
         unparsed_details.append((f, reason))
+
+    gene_index = extract_gene_index(f)
+    if gene_index is None:
+        n_skip_no_gene_index += 1
+        gq, gt = "unknown", "unknown"
+    else:
+        gq, gt = rbh_by_index.get(gene_index, (None, None))
+        if gq is None or gt is None:
+            n_skip_no_rbh_row += 1
+            gq, gt = "unknown", "unknown"
+
+    category, detail = split_skip_reason(reason)
+    skipped_rows.append((
+        str(gene_index) if gene_index is not None else "unknown",
+        gq, gt, category, detail, f,
+    ))
 
 # Join in alignment-quality columns from rbh_pairs.tsv by (gene1, gene2).
 # This should always match — every gene pair reaching codeml originated
@@ -236,6 +332,15 @@ if n_no_rbh_match:
     print(f"[collate_results]   WARNING: {n_no_rbh_match} gene pair(s) parsed from codeml output "
           f"had no matching row in {rbh_tsv} — alignment quality columns are 'NA' for these. "
           f"This is unexpected; check for gene ID mismatches upstream.")
+if n_skip_no_gene_index:
+    print(f"[collate_results]   WARNING: {n_skip_no_gene_index} skipped file(s) had a path that "
+          f"didn't match the expected 'geneN' pattern — their IDs are 'unknown' in "
+          f"{skip_tsv.name}. This is unexpected; check for a Snakefile path convention change.")
+if n_skip_no_rbh_row:
+    print(f"[collate_results]   WARNING: {n_skip_no_rbh_row} skipped file(s) had a gene index with "
+          f"no matching row in {rbh_tsv} — their IDs are 'unknown' in {skip_tsv.name}. "
+          f"This is unexpected; check that rbh_pairs.tsv wasn't modified after the gene list "
+          f"was fixed for this run.")
 
 with open(output_file, "w") as fh:
     fh.write("Gene_query\tGene_target\tt\tdN\tdS\tdNdS\tpident\tquery_coverage\ttarget_coverage\n")
@@ -275,3 +380,24 @@ else:
     print(f"[collate_results] No genes exceed dS saturation threshold ({ds_sat_threshold})")
 
 print(f"[collate_results] Saturation check written: {sat_tsv}")
+
+# ── Skipped genes table ───────────────────────────────────────────────────────
+# Every gene pair that never made it into dnds_output.tsv, across all
+# three skip categories from parse_codeml() above — sentinel (expected,
+# benign trimming attrition), unparsed, and bad_labels (both genuinely
+# unexpected). Sorted by gene_index purely for readability; "unknown"
+# sorts after all numeric indices via the key function below.
+skip_tsv.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _skip_sort_key(row):
+    idx = row[0]
+    return (0, int(idx)) if idx.isdigit() else (1, idx)
+
+
+with open(skip_tsv, "w") as fh:
+    fh.write("gene_index\tGene_query\tGene_target\tskip_category\tskip_detail\tcodeml_output_file\n")
+    for gene_index, gq, gt, category, detail, f in sorted(skipped_rows, key=_skip_sort_key):
+        fh.write(f"{gene_index}\t{gq}\t{gt}\t{category}\t{detail}\t{f}\n")
+
+print(f"[collate_results] {len(skipped_rows)} skipped gene pair(s) written: {skip_tsv}")
